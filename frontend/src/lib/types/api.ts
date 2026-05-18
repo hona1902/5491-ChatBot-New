@@ -41,6 +41,35 @@ export interface SourceListResponse {
 export interface SourceDetailResponse extends SourceListResponse {
   full_text: string
   notebooks?: string[]  // List of notebook IDs this source is linked to
+  table_count?: number  // Number of extracted tables (from Wave 2A backend)
+}
+
+// Table-aware QA: Phase 2 types
+export interface SourceTableListItem {
+  id: string
+  table_index: number
+  sheet_name?: string | null
+  page_number?: number | null
+  row_count: number
+  col_count: number
+  column_headers: string[]
+  truncated: boolean
+}
+
+export interface SourceTableDetailResponse {
+  id: string
+  table_index: number
+  sheet_name?: string | null
+  page_number?: number | null
+  row_count: number
+  col_count: number
+  column_headers: string[]
+  truncated: boolean
+  rows: string[][]          // paginated rows
+  total_rows: number        // total row count for pagination
+  offset: number
+  limit: number
+  markdown_repr?: string    // full markdown representation
 }
 
 export type SourceResponse = SourceDetailResponse

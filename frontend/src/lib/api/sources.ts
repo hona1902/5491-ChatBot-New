@@ -7,7 +7,9 @@ import {
   SourceResponse,
   SourceStatusResponse,
   CreateSourceRequest, 
-  UpdateSourceRequest 
+  UpdateSourceRequest,
+  SourceTableListItem,
+  SourceTableDetailResponse,
 } from '@/lib/types/api'
 
 export const sourcesApi = {
@@ -104,5 +106,34 @@ export const sourcesApi = {
     return apiClient.get(`/sources/${id}/download`, {
       responseType: 'blob',
     })
+  },
+
+  /**
+   * List all extracted tables for a source.
+   * Uses encodeURIComponent because SurrealDB IDs contain ':' (e.g. "source:abc123").
+   */
+  getTables: async (sourceId: string): Promise<SourceTableListItem[]> => {
+    const encodedId = encodeURIComponent(sourceId)
+    const response = await apiClient.get<SourceTableListItem[]>(`/sources/${encodedId}/tables`)
+    return response.data
+  },
+
+  /**
+   * Fetch paginated row data for a specific table.
+   * Uses encodeURIComponent on both IDs to handle SurrealDB ':' separators.
+   */
+  getTableDetail: async (
+    sourceId: string,
+    tableId: string,
+    offset: number = 0,
+    limit: number = 50,
+  ): Promise<SourceTableDetailResponse> => {
+    const encodedSourceId = encodeURIComponent(sourceId)
+    const encodedTableId = encodeURIComponent(tableId)
+    const response = await apiClient.get<SourceTableDetailResponse>(
+      `/sources/${encodedSourceId}/tables/${encodedTableId}`,
+      { params: { offset, limit } }
+    )
+    return response.data
   },
 }

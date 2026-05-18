@@ -64,16 +64,16 @@
 
 > **Framework note:** The frontend is Next.js App Router with React and TypeScript (`.tsx`). There is NO Svelte in this project. All tasks in this section use React hooks and TypeScript.
 
-- [ ] 6.1 Add `table_count?: number` to `SourceDetailResponse` interface in `frontend/src/lib/types/api.ts`; add `SourceTableListItem` and `SourceTableDetailResponse` interfaces to the same file
-- [ ] 6.2 Add `getTables(sourceId: string)` and `getTableDetail(sourceId: string, tableId: string, offset: number, limit: number)` methods to `frontend/src/lib/api/sources.ts` (Axios client)
-- [ ] 6.3 Create `frontend/src/components/source/TablesPanel.tsx` as a React component (`.tsx`); accept `sourceId: string` and `tableCount: number` as props
-- [ ] 6.4 Implement table list view inside `TablesPanel.tsx`: render each table's index, `page_number`, `sheet_name`, `row_count`, `col_count`, and a "Truncated" badge using existing shadcn/ui `Badge` component
-- [ ] 6.5 Implement row pagination within each expanded table: use `useState` for current page, fetch rows via `getTableDetail` with `offset` and `limit=50`; show prev/next controls
-- [ ] 6.6 Implement "Copy as Markdown" button: call `getTableDetail` to get `markdown_repr`, copy to clipboard via `navigator.clipboard.writeText()`
-- [ ] 6.7 Implement "Copy as CSV" button: convert `rows` + `column_headers` to RFC 4180 CSV string (handle commas/quotes), copy via `navigator.clipboard.writeText()`
-- [ ] 6.8 Import `TablesPanel` inside `frontend/src/components/source/SourceDetailContent.tsx`; render it below the existing source detail sections; hide entirely when `table_count === 0` or `table_count` is undefined
-- [ ] 6.9 Add loading state (use existing spinner pattern from the project) and error state (inline error message) to `TablesPanel.tsx`
-- [ ] 6.10 Manual smoke test: open a CSV source in the UI → Tables panel visible with correct row count; open a PDF source with no tables → Tables panel hidden
+- [x] 6.1 Add `table_count?: number` to `SourceDetailResponse` interface in `frontend/src/lib/types/api.ts`; add `SourceTableListItem` and `SourceTableDetailResponse` interfaces to the same file
+- [x] 6.2 Add `getTables(sourceId: string)` and `getTableDetail(sourceId: string, tableId: string, offset: number, limit: number)` methods to `frontend/src/lib/api/sources.ts` (Axios client)
+- [x] 6.3 Create `frontend/src/components/source/TablesPanel.tsx` as a React component (`.tsx`); accept `sourceId: string` and `tableCount: number` as props
+- [x] 6.4 Implement table list view inside `TablesPanel.tsx`: render each table's index, `page_number`, `sheet_name`, `row_count`, `col_count`, and a "Truncated" badge using existing shadcn/ui `Badge` component
+- [x] 6.5 Implement row pagination within each expanded table: use `useState` for current page, fetch rows via `getTableDetail` with `offset` and `limit=50`; show prev/next controls
+- [x] 6.6 Implement "Copy as Markdown" button: call `getTableDetail` to get `markdown_repr`, copy to clipboard via `navigator.clipboard.writeText()`
+- [x] 6.7 Implement "Copy as CSV" button: convert `rows` + `column_headers` to RFC 4180 CSV string (handle commas/quotes), copy via `navigator.clipboard.writeText()`
+- [x] 6.8 Import `TablesPanel` inside `frontend/src/components/source/SourceDetailContent.tsx`; render it below the existing source detail sections; hide entirely when `table_count === 0` or `table_count` is undefined
+- [x] 6.9 Add loading state (use existing spinner pattern from the project) and error state (inline error message) to `TablesPanel.tsx`
+- [x] 6.10 Manual smoke test: open a CSV source in the UI → Tables panel visible with correct row count; open a PDF source with no tables → Tables panel hidden
 
 ## 7. Backfill Script
 

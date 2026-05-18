@@ -67,6 +67,7 @@ import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { SourceInsightDialog } from '@/components/source/SourceInsightDialog'
 import { NotebookAssociations } from '@/components/source/NotebookAssociations'
+import { TablesPanel } from '@/components/source/TablesPanel'
 import { useIsAdmin } from '@/lib/hooks/use-is-admin'
 
 interface SourceDetailContentProps {
@@ -813,6 +814,16 @@ export function SourceDetailContent({
               currentNotebookIds={source.notebooks || []}
               onSave={fetchSource}
             />
+
+            {/* Tables Panel — shown only when source has extracted tables */}
+            {source.table_count != null && source.table_count > 0 && (
+              <div className="mt-6">
+                <TablesPanel
+                  sourceId={sourceId}
+                  tableCount={source.table_count}
+                />
+              </div>
+            )}
           </TabsContent>
         </Tabs>
       </div>
