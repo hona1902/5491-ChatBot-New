@@ -166,8 +166,8 @@ def _mock_user(role="admin", is_active=True):
 class TestSourceDelete:
     """Tests for DELETE /sources/{source_id}.
 
-    DELETE requires admin (require_admin dependency). We patch both
-    api.auth.AppUser (for JWT decode) and require_admin directly.
+    DELETE requires admin (require_admin dependency). We patch
+    api.auth.AppUser (for JWT decode) so the admin guard resolves.
     """
 
     @patch("api.auth.AppUser")
@@ -212,24 +212,31 @@ class TestSourceDelete:
 # ── TestSourceStatusAfterDelete ───────────────────────────────────────────────
 
 class TestSourceStatusAfterDelete:
-    """GET /sources/{source_id}/status after source deletion must return 404, not 500.
+    """GET /sources/{source_id}/status after deletion must return 404 with no ERROR log.
 
-    Root cause: Source.get() raises NotFoundError for deleted records.
-    Before this fix the exception propagated to the generic except-Exception
-    handler → 500 + noisy error log.
-    After this fix NotFoundError is caught explicitly → 404 + info-level log.
+    Root cause of noisy logs:
+      Source.get() (domain/base.py lines 124-128) catches its own NotFoundError
+      inside a broad `except Exception` block, then calls logger.error() +
+      logger.exception() (full traceback) before re-raising. Catching
+      NotFoundError at the router level does NOT prevent those noisy logs.
+
+    Fix:
+      Use repo_query directly for the existence check — it returns [] for
+      missing records with zero error logging.  Source.get() is only called
+      after the record is confirmed to exist (safe path, no error logs emitted).
+
+    These tests patch `api.routers.sources.repo_query` (not Source.get) to
+    match the new implementation.
     """
 
     @patch("api.auth.AppUser")
-    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
     def test_status_of_deleted_source_returns_404_not_500(
-        self, mock_get, mock_auth_cls, client
+        self, mock_query, mock_auth_cls, client
     ):
-        """GET /sources/{id}/status after delete MUST NOT return 500."""
-        from open_notebook.exceptions import NotFoundError
-
+        """GET /sources/{id}/status after delete must return 404, not 500."""
         mock_auth_cls.get = AsyncMock(return_value=_mock_user())
-        mock_get.side_effect = NotFoundError("source with id source:gone not found")
+        mock_query.return_value = []  # DB returns no row — source is gone
 
         response = client.get(
             "/api/sources/source:gone/status",
@@ -242,13 +249,11 @@ class TestSourceStatusAfterDelete:
         )
 
     @patch("api.auth.AppUser")
-    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
-    def test_status_of_deleted_source_response_body(self, mock_get, mock_auth_cls, client):
-        """GET /sources/{id}/status for missing source returns a clear JSON 404 body."""
-        from open_notebook.exceptions import NotFoundError
-
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_status_of_deleted_source_response_body(self, mock_query, mock_auth_cls, client):
+        """Missing source status returns a structured JSON 404 body."""
         mock_auth_cls.get = AsyncMock(return_value=_mock_user())
-        mock_get.side_effect = NotFoundError("source with id source:gone not found")
+        mock_query.return_value = []
 
         response = client.get(
             "/api/sources/source:gone/status",
@@ -258,27 +263,44 @@ class TestSourceStatusAfterDelete:
         assert response.status_code == 404
         body = response.json()
         assert "detail" in body
-        # Response must mention the source id or "not found"
         assert (
             "source:gone" in body["detail"]
             or "not found" in body["detail"].lower()
         )
 
     @patch("api.auth.AppUser")
-    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
-    def test_status_not_500_for_any_notfounderror(self, mock_get, mock_auth_cls, client):
-        """Any NotFoundError from Source.get must produce 404, never 500."""
-        from open_notebook.exceptions import NotFoundError
-
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_status_not_500_for_missing_source(self, mock_query, mock_auth_cls, client):
+        """A missing source must always produce 404, never 500."""
         mock_auth_cls.get = AsyncMock(return_value=_mock_user())
-        mock_get.side_effect = NotFoundError("Object with id source:x not found - ...")
+        mock_query.return_value = []
 
         response = client.get("/api/sources/source:x/status", headers=_auth())
 
         assert response.status_code != 500, (
-            "NotFoundError must not escape as a 500 from the status endpoint."
+            "Missing source must not produce a 500 from the status endpoint."
         )
         assert response.status_code == 404
+
+    @patch("api.auth.AppUser")
+    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_source_get_is_not_called_for_missing_source(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
+        """Source.get() must NOT be called when the source row is absent.
+
+        Source.get() always logs ERROR+traceback for missing records.
+        The fix must short-circuit before ever reaching Source.get().
+        This test proves the noisy log path is fully bypassed.
+        """
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        mock_query.return_value = []  # DB says source doesn't exist
+
+        client.get("/api/sources/source:deleted/status", headers=_auth())
+
+        # Source.get must never be called — calling it would trigger ERROR logs
+        mock_source_get.assert_not_called()
 
 
 # ── TestSourceStatusExistingSource ────────────────────────────────────────────
@@ -287,15 +309,16 @@ class TestSourceStatusExistingSource:
     """GET /sources/{source_id}/status still works correctly for live sources."""
 
     @patch("api.auth.AppUser")
-    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
-    def test_status_legacy_source_no_command(self, mock_get, mock_auth_cls, client):
-        """Legacy source (no command field) returns 200 with status=None."""
-        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_status_legacy_source_no_command(self, mock_query, mock_auth_cls, client):
+        """Legacy source (command=None) returns 200 with status=None.
 
-        mock_source = MagicMock()
-        mock_source.id = "source:legacy"
-        mock_source.command = None
-        mock_get.return_value = mock_source
+        For legacy sources, Source.get() is NOT called — we only need the
+        command field from the repo_query row.
+        """
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        # Source exists in DB but has no command (pre-async legacy source)
+        mock_query.return_value = [{"id": "source:legacy", "command": None}]
 
         response = client.get("/api/sources/source:legacy/status", headers=_auth())
 
@@ -306,10 +329,16 @@ class TestSourceStatusExistingSource:
 
     @patch("api.auth.AppUser")
     @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
-    def test_status_active_source_returns_completed(self, mock_get, mock_auth_cls, client):
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_status_active_source_returns_completed(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
         """Existing source with a completed command returns 200 + status='completed'."""
         mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        # repo_query: source exists and has a command ref
+        mock_query.return_value = [{"id": "source:active", "command": "command:123"}]
 
+        # Source.get() is called only AFTER existence confirmed — safe, no error log
         mock_source = MagicMock()
         mock_source.id = "source:active"
         mock_source.command = "command:123"
@@ -317,7 +346,7 @@ class TestSourceStatusExistingSource:
         mock_source.get_processing_progress = AsyncMock(
             return_value={"started_at": "2026-01-01", "completed_at": "2026-01-02"}
         )
-        mock_get.return_value = mock_source
+        mock_source_get.return_value = mock_source
 
         response = client.get("/api/sources/source:active/status", headers=_auth())
 
@@ -326,7 +355,27 @@ class TestSourceStatusExistingSource:
         assert body["status"] == "completed"
         assert "completed" in body["message"].lower()
 
+    @patch("api.auth.AppUser")
+    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_source_get_called_only_when_source_exists(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
+        """Source.get() is called exactly once when source is confirmed to exist."""
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        mock_query.return_value = [{"id": "source:active", "command": "command:123"}]
+
+        mock_source = MagicMock()
+        mock_source.id = "source:active"
+        mock_source.command = "command:123"
+        mock_source.get_status = AsyncMock(return_value="running")
+        mock_source.get_processing_progress = AsyncMock(return_value={})
+        mock_source_get.return_value = mock_source
+
+        client.get("/api/sources/source:active/status", headers=_auth())
+
+        mock_source_get.assert_called_once()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

@@ -870,15 +870,44 @@ async def get_source_status(
     source_id: str,
     current_user: AppUser = Depends(get_current_user),
 ):
-    """Get processing status for a source."""
-    try:
-        # Source.get() raises NotFoundError when the record does not exist.
-        # This is the expected path for deleted sources — catch it explicitly
-        # so we return 404 instead of letting it propagate to the generic 500 handler.
-        source = await Source.get(source_id)
+    """Get processing status for a source.
 
-        # Check if this is a legacy source (no command)
-        if not source.command:
+    Uses a direct repo_query existence check instead of Source.get() to avoid
+    noisy ERROR/traceback logs when a source has been deleted.
+
+    Source.get() (open_notebook/domain/base.py) catches its own NotFoundError
+    inside a broad `except Exception` block, then calls logger.error() +
+    logger.exception() (full traceback) before re-raising.  We cannot suppress
+    that logging from the outside.  By querying the record directly with
+    repo_query we get a clean empty-list result for missing sources with zero
+    error logging.
+    """
+    try:
+        # ── Quiet existence check ─────────────────────────────────────────────
+        # Source.get() always logs ERROR + full traceback before raising
+        # NotFoundError, making polling-after-delete very noisy.
+        # repo_query returns [] for a missing record with zero logging.
+        rows = await repo_query(
+            "SELECT id, command FROM $id",
+            {"id": ensure_record_id(source_id)},
+        )
+
+        if not rows:
+            # Expected race condition: source deleted between the DELETE request
+            # and this status poll.  Log at INFO level, not ERROR.
+            logger.info(
+                f"Status polled for deleted/missing source {source_id!r} — returning 404"
+            )
+            raise HTTPException(
+                status_code=404,
+                detail=f"Source '{source_id}' not found. It may have been deleted.",
+            )
+
+        # ── Source exists — check command field ───────────────────────────────
+        command_ref = rows[0].get("command")
+
+        if not command_ref:
+            # Legacy source: created before async processing was introduced.
             return SourceStatusResponse(
                 status=None,
                 message="Legacy source (completed before async processing)",
@@ -886,12 +915,15 @@ async def get_source_status(
                 command_id=None,
             )
 
-        # Get command status and processing info
+        # ── Source has a command — load full object for status methods ─────────
+        # Source.get() is safe here: the record is confirmed to exist, so it
+        # will return successfully without logging any error.
+        source = await Source.get(source_id)
+
         try:
             status = await source.get_status()
             processing_info = await source.get_processing_progress()
 
-            # Generate descriptive message based on status
             if status == "completed":
                 message = "Source processing completed successfully"
             elif status == "failed":
@@ -918,21 +950,11 @@ async def get_source_status(
                 status="unknown",
                 message="Failed to retrieve processing status",
                 processing_info=None,
-                command_id=str(source.command) if source.command else None,
+                command_id=str(command_ref) if command_ref else None,
             )
 
     except HTTPException:
         raise
-    except NotFoundError:
-        # Source was deleted between the delete request and this status poll.
-        # This is expected during polling — log at info level, not error.
-        logger.info(
-            f"Status polled for deleted/missing source {source_id!r} — returning 404"
-        )
-        raise HTTPException(
-            status_code=404,
-            detail=f"Source '{source_id}' not found. It may have been deleted.",
-        )
     except Exception as e:
         logger.error(f"Error fetching status for source {source_id}: {str(e)}")
         raise HTTPException(
