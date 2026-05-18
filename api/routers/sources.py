@@ -37,7 +37,7 @@ from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Notebook, Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.domain.user import AppUser
-from open_notebook.exceptions import InvalidInputError
+from open_notebook.exceptions import InvalidInputError, NotFoundError
 
 router = APIRouter()
 
@@ -872,10 +872,10 @@ async def get_source_status(
 ):
     """Get processing status for a source."""
     try:
-        # First, verify source exists
+        # Source.get() raises NotFoundError when the record does not exist.
+        # This is the expected path for deleted sources — catch it explicitly
+        # so we return 404 instead of letting it propagate to the generic 500 handler.
         source = await Source.get(source_id)
-        if not source:
-            raise HTTPException(status_code=404, detail="Source not found")
 
         # Check if this is a legacy source (no command)
         if not source.command:
@@ -923,6 +923,16 @@ async def get_source_status(
 
     except HTTPException:
         raise
+    except NotFoundError:
+        # Source was deleted between the delete request and this status poll.
+        # This is expected during polling — log at info level, not error.
+        logger.info(
+            f"Status polled for deleted/missing source {source_id!r} — returning 404"
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source '{source_id}' not found. It may have been deleted.",
+        )
     except Exception as e:
         logger.error(f"Error fetching status for source {source_id}: {str(e)}")
         raise HTTPException(
