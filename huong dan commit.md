@@ -52,3 +52,11 @@ git add .
 git commit -m "feat: add phase 1 table-aware QA"
 
 Như vậy bạn có cả branch backup và tag mốc thời gian. Sau này có lỗi nghiêm trọng, bạn luôn quay lại được trạng thái trước Phase 1.
+
+Sau này muốn quay về code trước Wave 2A:
+
+git checkout backup-before-table-aware-qa-phase2a
+
+Hoặc tạo branch mới từ tag:
+
+git checkout -b restore-before-phase2a before-table-aware-qa-phase2a

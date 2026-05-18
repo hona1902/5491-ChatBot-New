@@ -657,20 +657,21 @@ async def get_source(
 
         embedded_chunks = await source.get_embedded_chunks()
 
-        # Combined query: get notebook associations + table_count in one round-trip.
-        # table_count uses an inline subquery matching the insights_count pattern
-        # in get_sources() — no extra DB round-trip.
-        meta_result = await repo_query(
-            """
-            SELECT
-                (SELECT VALUE out FROM reference WHERE in = $source_id) AS notebooks,
-                (SELECT VALUE count() FROM source_table WHERE source = $source_id GROUP ALL)[0].count OR 0 AS table_count
-            """,
+        # Notebook associations — original proven-safe query pattern
+        notebooks_query = await repo_query(
+            "SELECT VALUE out FROM reference WHERE in = $source_id",
             {"source_id": ensure_record_id(source.id or source_id)},
         )
-        meta = meta_result[0] if meta_result else {}
-        notebook_ids = [str(nb_id) for nb_id in meta.get("notebooks") or []]
-        table_count = int(meta.get("table_count") or 0)
+        notebook_ids = [str(nb_id) for nb_id in (notebooks_query or [])]
+
+        # table_count — separate query matching get_embedded_chunks() pattern.
+        # A combined SELECT without FROM is invalid SurrealQL (causes 500).
+        # Correctness takes priority over saving one round-trip.
+        table_count_result = await repo_query(
+            "SELECT count() AS cnt FROM source_table WHERE source = $source_id GROUP ALL",
+            {"source_id": ensure_record_id(source.id or source_id)},
+        )
+        table_count = int(table_count_result[0]["cnt"] or 0) if table_count_result else 0
 
         return SourceResponse(
             id=source.id or "",
@@ -694,7 +695,7 @@ async def get_source(
             processing_info=processing_info,
             # Notebook associations
             notebooks=notebook_ids,
-            # Table count (inline subquery — same round-trip as notebooks)
+            # Table count (separate query — SELECT without FROM is invalid SurrealQL)
             table_count=table_count,
         )
     except HTTPException:

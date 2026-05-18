@@ -321,26 +321,34 @@ class TestTableNotFound:
         assert resp.status_code == 404
 
 
-# ── Task 4.11 — GET /sources/{id} includes table_count ───────────────────────
 
 class TestSourceDetailTableCount:
+    """4.11 GET /sources/{id} response includes table_count.
+    Fixed in Wave 2A-2 regression: now uses TWO separate repo_query calls
+    (notebooks query + table_count query) instead of one invalid SELECT without FROM.
+    """
+
+    def _src(self):
+        src = _mock_source()
+        src.get_embedded_chunks = AsyncMock(return_value=5)
+        src.get_status = AsyncMock(return_value=None)
+        src.get_processing_progress = AsyncMock(return_value=None)
+        return src
+
     @patch("api.auth.AppUser")
     @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
     @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
     def test_source_detail_includes_table_count(
         self, mock_query, mock_source_get, mock_auth_cls, client
     ):
-        """4.11 GET /sources/{id} response includes table_count field."""
+        """4.11 table_count reflects count returned by SurrealDB."""
         mock_auth_cls.get = AsyncMock(return_value=_mock_user())
-
-        src = _mock_source()
-        src.get_embedded_chunks = AsyncMock(return_value=5)
-        src.get_status = AsyncMock(return_value=None)
-        src.get_processing_progress = AsyncMock(return_value=None)
-        mock_source_get.return_value = src
-
-        # Combined meta query returns notebooks + table_count
-        mock_query.return_value = [{"notebooks": [], "table_count": 3}]
+        mock_source_get.return_value = self._src()
+        # Two sequential repo_query calls: [notebooks query, table_count query]
+        mock_query.side_effect = [
+            [],                # notebooks → none
+            [{"cnt": 3}],     # table_count → 3
+        ]
 
         resp = client.get("/api/sources/source:abc", headers=_auth())
 
@@ -357,14 +365,11 @@ class TestSourceDetailTableCount:
     ):
         """table_count is 0 when source has no source_table records."""
         mock_auth_cls.get = AsyncMock(return_value=_mock_user())
-
-        src = _mock_source()
-        src.get_embedded_chunks = AsyncMock(return_value=0)
-        src.get_status = AsyncMock(return_value=None)
-        src.get_processing_progress = AsyncMock(return_value=None)
-        mock_source_get.return_value = src
-
-        mock_query.return_value = [{"notebooks": [], "table_count": 0}]
+        mock_source_get.return_value = self._src()
+        mock_query.side_effect = [
+            [],   # notebooks
+            [],   # table_count query returns empty → 0
+        ]
 
         resp = client.get("/api/sources/source:abc", headers=_auth())
 
@@ -374,19 +379,141 @@ class TestSourceDetailTableCount:
     @patch("api.auth.AppUser")
     @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
     @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_source_detail_table_count_cnt_none(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
+        """table_count is 0 when SurrealDB returns cnt=None (GROUP ALL on empty)."""
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        mock_source_get.return_value = self._src()
+        mock_query.side_effect = [
+            [],
+            [{"cnt": None}],  # SurrealDB may return None on empty GROUP ALL
+        ]
+
+        resp = client.get("/api/sources/source:abc", headers=_auth())
+
+        # Must not 500 — int(None or 0) == 0
+        assert resp.status_code == 200
+        assert resp.json()["table_count"] == 0
+
+    @patch("api.auth.AppUser")
+    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
     def test_table_count_not_present_in_list_endpoint(
         self, mock_query, mock_source_get, mock_auth_cls, client
     ):
-        """table_count is NOT a field on the source list response (only on detail)."""
+        """table_count is NOT a field on the source list response (detail-only)."""
         mock_auth_cls.get = AsyncMock(return_value=_mock_user())
         mock_query.return_value = []
 
         resp = client.get("/api/sources", headers=_auth())
 
         assert resp.status_code == 200
-        # List items don't have table_count (it's a detail-only field)
         for item in resp.json():
             assert "table_count" not in item
+
+
+# ── Regression: Wave 2A-2 caused GET /sources/{id} to 500 for all sources ─────
+
+class TestSourceDetailNoSurrealDB500:
+    """Regression suite: SurrealQL SELECT without FROM is invalid and caused 500s.
+    Fixed by restoring two separate proven-safe queries.
+    """
+
+    def _src(self, source_id="source:docx1", has_asset=True):
+        src = MagicMock()
+        src.id = source_id
+        src.title = "VB TEST BANG BIEU.docx"
+        src.topics = []
+        src.full_text = "Table content from DOCX"
+        src.command = None
+        src.created = "2024-01-01T00:00:00"
+        src.updated = "2024-01-01T00:00:00"
+        if has_asset:
+            src.asset = MagicMock()
+            src.asset.file_path = None
+            src.asset.url = None
+        else:
+            src.asset = None
+        src.get_embedded_chunks = AsyncMock(return_value=0)
+        src.get_status = AsyncMock(return_value=None)
+        src.get_processing_progress = AsyncMock(return_value=None)
+        return src
+
+    @patch("api.auth.AppUser")
+    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_docx_source_returns_200_not_500(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
+        """Regression: DOCX source GET used to 500 due to invalid SurrealQL. Must be 200."""
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        mock_source_get.return_value = self._src()
+        mock_query.side_effect = [[], []]  # notebooks=[], table_count=0
+
+        resp = client.get("/api/sources/source:docx1", headers=_auth())
+
+        assert resp.status_code == 200, (
+            f"Expected 200, got {resp.status_code}: {resp.json()}"
+        )
+        assert resp.json()["table_count"] == 0
+
+    @patch("api.auth.AppUser")
+    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_source_with_zero_tables_returns_200(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
+        """Source with zero source_table records → 200, table_count=0."""
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        mock_source_get.return_value = self._src(source_id="source:csv1", has_asset=False)
+        mock_query.side_effect = [[], []]
+
+        resp = client.get("/api/sources/source:csv1", headers=_auth())
+
+        assert resp.status_code == 200
+        assert resp.json()["table_count"] == 0
+
+    @patch("api.auth.AppUser")
+    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_source_with_tables_returns_correct_count(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
+        """Source with 5 source_table records → 200, table_count=5."""
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        mock_source_get.return_value = self._src(source_id="source:xlsx1", has_asset=False)
+        mock_query.side_effect = [
+            [],              # notebooks
+            [{"cnt": 5}],   # table_count
+        ]
+
+        resp = client.get("/api/sources/source:xlsx1", headers=_auth())
+
+        assert resp.status_code == 200
+        assert resp.json()["table_count"] == 5
+
+    @patch("api.auth.AppUser")
+    @patch("api.routers.sources.Source.get", new_callable=AsyncMock)
+    @patch("api.routers.sources.repo_query", new_callable=AsyncMock)
+    def test_source_with_notebooks_and_tables(
+        self, mock_query, mock_source_get, mock_auth_cls, client
+    ):
+        """Source in 2 notebooks with 3 tables → notebooks and table_count both correct."""
+        mock_auth_cls.get = AsyncMock(return_value=_mock_user())
+        mock_source_get.return_value = self._src(has_asset=False)
+        mock_query.side_effect = [
+            ["notebook:nb1", "notebook:nb2"],  # notebooks query
+            [{"cnt": 3}],                       # table_count query
+        ]
+
+        resp = client.get("/api/sources/source:docx1", headers=_auth())
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["table_count"] == 3
+        assert "notebook:nb1" in data["notebooks"]
+        assert "notebook:nb2" in data["notebooks"]
 
 
 if __name__ == "__main__":
