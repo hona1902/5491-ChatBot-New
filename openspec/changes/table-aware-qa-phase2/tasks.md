@@ -94,5 +94,5 @@
 - [ ] 8.1 Run full existing test suite; confirm zero regressions on Phase 1 functionality
 - [ ] 8.2 Verify `source_chat` exact lookup still works correctly with the upgraded two-phase `table_exact_lookup`
 - [ ] 8.3 Verify `source.tables_markdown` is still populated correctly for new ingestions with Phase 2 safety caps active
-- [ ] 8.4 Update `CHANGELOG.md` with Phase 2 changes
-- [ ] 8.5 Update `.env.example` with new env vars: `OPEN_NOTEBOOK_TABLE_MAX_COLS`, `OPEN_NOTEBOOK_TABLES_MARKDOWN_MAX_CHARS`, `TABLE_LOOKUP_SIMILARITY_THRESHOLD`, `ASK_TABLE_SOURCE_THRESHOLD`
+- [x] 8.4 Update `CHANGELOG.md` with Phase 2 changes
+- [x] 8.5 Update `.env.example` with new env vars: `OPEN_NOTEBOOK_TABLE_MAX_COLS`, `OPEN_NOTEBOOK_TABLES_MARKDOWN_MAX_CHARS`, `TABLE_LOOKUP_SIMILARITY_THRESHOLD`, `ASK_TABLE_SOURCE_THRESHOLD`

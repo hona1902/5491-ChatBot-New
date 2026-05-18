@@ -33,8 +33,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `prompts/source_chat/system.jinja` updated with conditional table-grounding block when `## TABLE DATA` is present in context
   - `prompts/ask/final_answer.jinja` updated to preserve table citations verbatim from sub-answers
   - Phase 1 complete: 96 unit tests passing; no new Python dependencies introduced; `ask.py` unchanged
+- **Table-aware Q&A — Phase 2A** (safety controls, extraction hardening, table REST API)
+  - **Safety controls** — two new env vars cap extraction scope:
+    - `OPEN_NOTEBOOK_TABLE_MAX_COLS` (default 100): columns beyond this limit are dropped and `truncated=True` is set on the `ExtractedTable`
+    - `OPEN_NOTEBOOK_TABLES_MARKDOWN_MAX_CHARS` (default 50 000): `tables_markdown` assembly stops at the last complete-table boundary before this limit and appends a truncation marker; a warning is logged
+    - Cap enforcement moved into `TableExtractorRegistry` base logic so all extractors share the same guards without duplication
+    - `original_headers: Optional[List[str]]` field added to `ExtractedTable` Pydantic model for XLSX deduplication auditing
+    - Two additional env vars added for upcoming phases: `TABLE_LOOKUP_SIMILARITY_THRESHOLD` (default 0.4) and `ASK_TABLE_SOURCE_THRESHOLD` (default 0.35)
+  - **Extraction improvements**
+    - XLSX duplicate-header deduplication: repeated column names are renamed with `_2`/`_3` suffixes; `original_headers` is persisted in `source_table`; a warning is logged
+    - New HTML table extractor using stdlib `html.parser` — registered for `.html` / `.htm`; nested tables are flattened; malformed HTML returns an empty list with a warning
+    - `.xls` graceful degradation: if `xlrd` is not installed, returns `[]` with a user-visible warning `"XLS files are not supported. Please convert to XLSX format."`
+    - All Phase 1 extractor tests continue to pass (CSV, XLSX, PDF, DOCX)
+  - **Table REST API** — two new endpoints added to `api/routers/sources.py`:
+    - `GET /sources/{source_id}/tables` — returns list of `SourceTableListItem` ordered by `page_number ASC NULLS LAST, sheet_name ASC NULLS LAST`; protected by `Depends(get_current_user)` RBAC
+    - `GET /sources/{source_id}/tables/{table_id}` — returns `SourceTableDetailResponse` with paginated rows (`?offset` / `?limit`, max 1 000); 404 on unknown table
+    - `GET /sources/{source_id}` response now includes `table_count: int` field
+  - Wave 2A: 11 new API tests; no new Python dependencies; Phases 5–7 (ask.py strategy, frontend TablesPanel, backfill script) remain deferred
 
 ### Fixed
+- Fix: `GET /sources/{source_id}` returned HTTP 500 when `table_count` subquery used invalid inline SurrealQL syntax; replaced with two separate proven-safe DB calls and robust null/empty-result handling
 - Fix: Word tables no longer disappear when uploading DOCX; PDF tables now render correctly as Markdown tables
   - DOCX: Added `open_notebook/utils/docx_table_extractor.py` which traverses `doc.element.body` XML to extract paragraphs and tables in document order, converting tables to GFM Markdown format (content_core's office.py only iterates `doc.paragraphs`, silently dropping all table content)
   - PDF: Added `open_notebook/utils/pdf_table_preserver.py` which wraps Markdown table blocks in sentinel markers before `clean_pdf_text()` runs, then reassembles — preventing the regex clean pass from destroying `| col |` syntax
