@@ -27,6 +27,8 @@ from api.models import (
     SourceListResponse,
     SourceResponse,
     SourceStatusResponse,
+    SourceTableDetailResponse,
+    SourceTableListItem,
     SourceUpdate,
 )
 from commands.source_commands import SourceProcessingInput
@@ -655,14 +657,20 @@ async def get_source(
 
         embedded_chunks = await source.get_embedded_chunks()
 
-        # Get associated notebooks
-        notebooks_query = await repo_query(
-            "SELECT VALUE out FROM reference WHERE in = $source_id",
+        # Combined query: get notebook associations + table_count in one round-trip.
+        # table_count uses an inline subquery matching the insights_count pattern
+        # in get_sources() — no extra DB round-trip.
+        meta_result = await repo_query(
+            """
+            SELECT
+                (SELECT VALUE out FROM reference WHERE in = $source_id) AS notebooks,
+                (SELECT VALUE count() FROM source_table WHERE source = $source_id GROUP ALL)[0].count OR 0 AS table_count
+            """,
             {"source_id": ensure_record_id(source.id or source_id)},
         )
-        notebook_ids = (
-            [str(nb_id) for nb_id in notebooks_query] if notebooks_query else []
-        )
+        meta = meta_result[0] if meta_result else {}
+        notebook_ids = [str(nb_id) for nb_id in meta.get("notebooks") or []]
+        table_count = int(meta.get("table_count") or 0)
 
         return SourceResponse(
             id=source.id or "",
@@ -686,12 +694,144 @@ async def get_source(
             processing_info=processing_info,
             # Notebook associations
             notebooks=notebook_ids,
+            # Table count (inline subquery — same round-trip as notebooks)
+            table_count=table_count,
         )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error fetching source {source_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching source: {str(e)}")
+
+
+# ── Wave 2A-2: Table API Endpoints (tasks 4.3 & 4.4) ─────────────────────────
+
+
+@router.get("/sources/{source_id}/tables", response_model=List[SourceTableListItem])
+async def get_source_tables(
+    source_id: str,
+    current_user: AppUser = Depends(get_current_user),
+):
+    """List all extracted tables for a source, ordered by page_number / sheet_name.
+
+    Returns an empty list when the source exists but has no tables.
+    Returns 404 when the source does not exist.
+    Requires any authenticated user (same RBAC as GET /sources/{source_id}).
+    """
+    try:
+        # Verify source exists
+        source = await Source.get(source_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="Source not found")
+
+        result = await repo_query(
+            """
+            SELECT id, table_id, page_number, sheet_name, title,
+                   row_count, col_count, column_headers, truncated
+            FROM source_table
+            WHERE source = $source_id
+            ORDER BY page_number ASC NULLS LAST, sheet_name ASC NULLS LAST
+            """,
+            {"source_id": ensure_record_id(source_id)},
+        )
+
+        return [
+            SourceTableListItem(
+                id=str(row["id"]),
+                table_id=row.get("table_id", ""),
+                page_number=row.get("page_number"),
+                sheet_name=row.get("sheet_name"),
+                title=row.get("title"),
+                row_count=int(row.get("row_count") or 0),
+                col_count=int(row.get("col_count") or 0),
+                column_headers=row.get("column_headers") or [],
+                truncated=bool(row.get("truncated", False)),
+            )
+            for row in (result or [])
+        ]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching tables for source {source_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching tables: {str(e)}"
+        )
+
+
+@router.get(
+    "/sources/{source_id}/tables/{table_id:path}",
+    response_model=SourceTableDetailResponse,
+)
+async def get_source_table_detail(
+    source_id: str,
+    table_id: str,
+    offset: int = Query(0, ge=0, description="Row offset for pagination"),
+    limit: int = Query(
+        200, ge=1, le=1000, description="Row limit for pagination (1-1000)"
+    ),
+    current_user: AppUser = Depends(get_current_user),
+):
+    """Fetch a single source_table record with paginated row data.
+
+    ?offset and ?limit control which rows are returned (default 0 / 200, max 1000).
+    Returns 404 when the source or the table record does not exist.
+    Requires any authenticated user.
+    """
+    try:
+        # Verify source exists
+        source = await Source.get(source_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="Source not found")
+
+        # Fetch the table record; verify it belongs to this source
+        result = await repo_query(
+            """
+            SELECT id, table_id, page_number, sheet_name, title,
+                   row_count, col_count, column_headers, truncated,
+                   markdown_repr, row_data
+            FROM source_table
+            WHERE id = $rec_id AND source = $source_id
+            LIMIT 1
+            """,
+            {
+                "rec_id": ensure_record_id(table_id),
+                "source_id": ensure_record_id(source_id),
+            },
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Table not found")
+
+        row = result[0]
+        all_rows: List = row.get("row_data") or []
+        total_rows = int(row.get("row_count") or len(all_rows))
+        paginated_rows = all_rows[offset : offset + limit]
+
+        return SourceTableDetailResponse(
+            id=str(row["id"]),
+            table_id=row.get("table_id", ""),
+            page_number=row.get("page_number"),
+            sheet_name=row.get("sheet_name"),
+            title=row.get("title"),
+            row_count=total_rows,
+            col_count=int(row.get("col_count") or 0),
+            column_headers=row.get("column_headers") or [],
+            truncated=bool(row.get("truncated", False)),
+            markdown_repr=row.get("markdown_repr"),
+            rows=paginated_rows,
+            total_rows=total_rows,
+            offset=offset,
+            limit=limit,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error fetching table {table_id} for source {source_id}: {str(e)}"
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching table detail: {str(e)}"
+        )
 
 
 @router.head("/sources/{source_id}/download")

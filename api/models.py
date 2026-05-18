@@ -347,6 +347,8 @@ class SourceResponse(BaseModel):
     processing_info: Optional[Dict] = None
     # Notebook associations
     notebooks: Optional[List[str]] = None
+    # Table count (number of source_table records for this source)
+    table_count: Optional[int] = None
 
 
 class SourceListResponse(BaseModel):
@@ -421,6 +423,41 @@ class CreateSourceInsightRequest(BaseModel):
     model_id: Optional[str] = Field(
         None, description="Model ID (uses default if not provided)"
     )
+
+
+# Source Table API models (Wave 2A-2, tasks 4.1 & 4.2)
+class SourceTableListItem(BaseModel):
+    """Lightweight summary of one extracted table — no row data."""
+
+    id: str = Field(..., description="SurrealDB record ID of the source_table record")
+    table_id: str = Field(..., description="Logical table ID (e.g. 'source:x_table_0')")
+    page_number: Optional[int] = Field(None, description="Page number (PDF sources)")
+    sheet_name: Optional[str] = Field(None, description="Sheet name (XLSX sources)")
+    title: Optional[str] = Field(None, description="Optional table title / caption")
+    row_count: int = Field(..., description="Number of data rows")
+    col_count: int = Field(..., description="Number of columns")
+    column_headers: List[str] = Field(default_factory=list, description="Column header names")
+    truncated: bool = Field(False, description="True if the table was capped during extraction")
+
+
+class SourceTableDetailResponse(BaseModel):
+    """Full table record including paginated row data."""
+
+    id: str = Field(..., description="SurrealDB record ID of the source_table record")
+    table_id: str = Field(..., description="Logical table ID")
+    page_number: Optional[int] = Field(None, description="Page number (PDF sources)")
+    sheet_name: Optional[str] = Field(None, description="Sheet name (XLSX sources)")
+    title: Optional[str] = Field(None, description="Optional table title / caption")
+    row_count: int = Field(..., description="Total number of data rows in the table")
+    col_count: int = Field(..., description="Number of columns")
+    column_headers: List[str] = Field(default_factory=list, description="Column header names")
+    truncated: bool = Field(False, description="True if the table was capped during extraction")
+    markdown_repr: Optional[str] = Field(None, description="Markdown representation of the table")
+    # Paginated row data
+    rows: List[Dict[str, Any]] = Field(default_factory=list, description="Paginated row data (list of dicts)")
+    total_rows: int = Field(..., description="Total rows available (equals row_count)")
+    offset: int = Field(0, description="Row offset used for this page")
+    limit: int = Field(200, description="Row limit used for this page")
 
 
 # Source status response

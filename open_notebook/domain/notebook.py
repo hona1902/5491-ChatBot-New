@@ -297,6 +297,10 @@ class SourceTable(ObjectModel):
     page_number: Optional[int] = None
     sheet_name: Optional[str] = None
     column_headers: List[str] = Field(default_factory=list)
+    # original_headers stores pre-deduplication column names for XLSX sheets
+    # where duplicate headers were detected and renamed (e.g. Name → Name_2).
+    # None for non-XLSX sources or when no deduplication was needed.
+    original_headers: Optional[List[str]] = None
     row_data: List[Dict[str, Any]] = Field(default_factory=list)
     markdown_repr: str = ""
     row_count: int = 0

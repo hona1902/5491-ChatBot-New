@@ -1,32 +1,44 @@
 """
-Table Extractor Registry — Phase 1A
-====================================
+Table Extractor Registry — Phase 2A-1
+=======================================
 Dispatches to a per-file-type extractor that returns a list of ExtractedTable
 objects.  All extractors are wrapped in try/except so extraction failures
 never propagate to the ingestion graph.
 
-Supported in Phase 1A:
+Supported:
   .csv          → stdlib csv.DictReader     (no pandas)
-  .xlsx / .xls  → openpyxl                  (already in pyproject.toml transitive deps)
+  .xlsx         → openpyxl                  (already in pyproject.toml transitive deps)
+  .xls          → user-visible warning; xlrd not added (see .xls decision gate)
   .docx         → python-docx XML traversal (already present)
   .pdf          → fitz/PyMuPDF              (already used in pdf_table_preserver.py)
+  .html / .htm  → stdlib html.parser        (Phase 2A new — no new dependency)
 
-HTML deferred to Phase 2 (content-core already converts <table> → Markdown).
+Phase 2 changes vs Phase 1:
+  • TABLE_MAX_COLS: column-count cap enforced uniformly in _apply_col_cap().
+  • ExtractedTable gains optional_headers: Optional[List[str]] for XLSX dedup.
+  • XLSX extractor deduplicates column headers (_2/_3 suffix), stores originals.
+  • HTML extractor added for .html/.htm files.
+  • .xls files return [] with a user-visible warning instead of being routed
+    to the XLSX extractor (xlrd is not added; openpyxl cannot read .xls).
+  • _apply_col_cap() is the single enforcement point for both row and col caps
+    after each per-type extractor returns.
 """
 
 import csv
 import os
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from pydantic import BaseModel, Field
 
-# ── Row limit ────────────────────────────────────────────────────────────────
+# ── Limits (read once at module load; overridden in tests via monkeypatch) ─────
 TABLE_MAX_ROWS: int = int(os.environ.get("OPEN_NOTEBOOK_TABLE_MAX_ROWS", "5000"))
+TABLE_MAX_COLS: int = int(os.environ.get("OPEN_NOTEBOOK_TABLE_MAX_COLS", "100"))
 
 
-# ── ExtractedTable model ─────────────────────────────────────────────────────
+# ── ExtractedTable model ──────────────────────────────────────────────────────
 
 class ExtractedTable(BaseModel):
     """Structured representation of a single table extracted from a source file."""
@@ -36,6 +48,9 @@ class ExtractedTable(BaseModel):
     page_number: Optional[int] = None     # 1-based for PDF; None for all others
     sheet_name: Optional[str] = None      # XLSX sheet name; None for all others
     column_headers: List[str] = Field(default_factory=list)
+    # original_headers stores pre-deduplication headers for XLSX sheets.
+    # None for non-XLSX extractors or when no deduplication was needed.
+    original_headers: Optional[List[str]] = None
     row_data: List[Dict[str, Any]] = Field(default_factory=list)
     markdown_repr: str = ""
     row_count: int = 0
@@ -56,6 +71,36 @@ def _to_markdown(headers: List[str], rows: List[Dict[str, Any]]) -> str:
         for row in rows
     ]
     return "\n".join([header_row, sep] + data_rows)
+
+
+# ── Column-cap enforcement (Phase 2 — uniform across all extractors) ──────────
+
+def _apply_col_cap(
+    headers: List[str],
+    rows: List[Dict[str, Any]],
+    already_truncated: bool,
+    context: str = "",
+) -> tuple[List[str], List[Dict[str, Any]], bool]:
+    """
+    If the table has more columns than TABLE_MAX_COLS, drop excess columns,
+    set truncated=True, and log a warning.
+
+    Returns (capped_headers, capped_rows, truncated_flag).
+    """
+    if len(headers) <= TABLE_MAX_COLS:
+        return headers, rows, already_truncated
+
+    logger.warning(
+        f"Table extractor{' [' + context + ']' if context else ''}: "
+        f"column limit {TABLE_MAX_COLS} reached "
+        f"({len(headers)} columns); dropping excess columns"
+    )
+    capped_headers = headers[:TABLE_MAX_COLS]
+    capped_rows = [
+        {h: row.get(h, "") for h in capped_headers}
+        for row in rows
+    ]
+    return capped_headers, capped_rows, True
 
 
 # ── CSV extractor ─────────────────────────────────────────────────────────────
@@ -82,6 +127,9 @@ def _extract_csv(file_path: str, source_id: str, table_index: int) -> List[Extra
             # Coerce all values to str and normalise None
             rows.append({h: str(row.get(h) or "") for h in headers})
 
+    # Apply column cap (Phase 2)
+    headers, rows, truncated = _apply_col_cap(headers, rows, truncated, context=file_path)
+
     table_id = f"{source_id}_table_{table_index}"
     return [
         ExtractedTable(
@@ -99,6 +147,40 @@ def _extract_csv(file_path: str, source_id: str, table_index: int) -> List[Extra
     ]
 
 
+# ── XLSX duplicate-header deduplication helper ────────────────────────────────
+
+def _deduplicate_headers(raw_headers: List[str]) -> tuple[List[str], Optional[List[str]]]:
+    """
+    Detect duplicate column headers and rename them with _2, _3 ... suffixes
+    (matching the pandas convention).
+
+    Returns (deduped_headers, original_headers_or_None).
+    original_headers is None when no duplicates were found (avoids storing
+    redundant data for the common case).
+    """
+    seen: Dict[str, int] = {}
+    result: List[str] = []
+    has_duplicates = False
+
+    for h in raw_headers:
+        if h in seen:
+            has_duplicates = True
+            seen[h] += 1
+            result.append(f"{h}_{seen[h]}")
+        else:
+            seen[h] = 1
+            result.append(h)
+
+    if has_duplicates:
+        logger.warning(
+            f"XLSX extractor: duplicate column headers detected — "
+            f"renamed with _2/_3 suffixes. Original: {raw_headers}"
+        )
+        return result, raw_headers
+
+    return result, None  # No duplicates → original_headers not needed
+
+
 # ── XLSX extractor ────────────────────────────────────────────────────────────
 
 def _extract_xlsx(file_path: str, source_id: str, table_index_start: int) -> List[ExtractedTable]:
@@ -114,9 +196,14 @@ def _extract_xlsx(file_path: str, source_id: str, table_index_start: int) -> Lis
             if not all_rows:
                 continue
 
-            # First row → headers
-            raw_headers = [str(cell) if cell is not None else f"Col{i}" for i, cell in enumerate(all_rows[0])]
-            headers = raw_headers
+            # First row → headers; fill None cells with positional placeholder
+            raw_headers = [
+                str(cell) if cell is not None else f"Col{i}"
+                for i, cell in enumerate(all_rows[0])
+            ]
+
+            # Phase 2: deduplicate headers, store originals if needed
+            headers, original_headers = _deduplicate_headers(raw_headers)
 
             truncated = False
             rows: List[Dict[str, Any]] = []
@@ -124,14 +211,26 @@ def _extract_xlsx(file_path: str, source_id: str, table_index_start: int) -> Lis
                 if len(rows) >= TABLE_MAX_ROWS:
                     truncated = True
                     logger.warning(
-                        f"XLSX extractor: row limit {TABLE_MAX_ROWS} reached in sheet '{sheet_name}'; truncating"
+                        f"XLSX extractor: row limit {TABLE_MAX_ROWS} reached in "
+                        f"sheet '{sheet_name}'; truncating"
                     )
                     break
-                row_dict = {headers[i]: str(cell) if cell is not None else "" for i, cell in enumerate(raw_row)}
+                # Use deduplicated headers as dict keys
+                row_dict = {
+                    headers[i]: str(cell) if cell is not None else ""
+                    for i, cell in enumerate(raw_row)
+                    if i < len(headers)
+                }
                 rows.append(row_dict)
 
             if not rows:
                 continue  # Skip sheets with only a header row and no data
+
+            # Apply column cap (Phase 2)
+            headers, rows, truncated = _apply_col_cap(
+                headers, rows, truncated,
+                context=f"{file_path}!{sheet_name}"
+            )
 
             table_id = f"{source_id}_table_{table_index_start + sheet_offset}"
             tables.append(
@@ -141,6 +240,7 @@ def _extract_xlsx(file_path: str, source_id: str, table_index_start: int) -> Lis
                     page_number=None,
                     sheet_name=sheet_name,
                     column_headers=headers,
+                    original_headers=original_headers,
                     row_data=rows,
                     markdown_repr=_to_markdown(headers, rows),
                     row_count=len(rows),
@@ -151,6 +251,24 @@ def _extract_xlsx(file_path: str, source_id: str, table_index_start: int) -> Lis
     finally:
         wb.close()
     return tables
+
+
+# ── .xls decision gate (Phase 2) ─────────────────────────────────────────────
+
+def _extract_xls(file_path: str, source_id: str, table_index_start: int) -> List[ExtractedTable]:
+    """
+    .xls files are the legacy Excel binary format.  openpyxl cannot read them
+    and xlrd (the only viable reader) is unmaintained and has had security
+    vulnerabilities, so we deliberately do NOT add it as a dependency.
+
+    We return an empty list and surface a user-visible warning so the operator
+    or user knows to convert the file.
+    """
+    logger.warning(
+        f"XLS files are not supported. Please convert '{Path(file_path).name}' "
+        f"to XLSX format. Returning empty table list — ingestion continues."
+    )
+    return []
 
 
 # ── PDF extractor ─────────────────────────────────────────────────────────────
@@ -183,7 +301,10 @@ def _extract_pdf(file_path: str, source_id: str, table_index_start: int) -> List
                         continue
 
                     # First row is headers
-                    headers = [str(cell).strip() if cell else f"Col{i}" for i, cell in enumerate(raw_data[0])]
+                    headers = [
+                        str(cell).strip() if cell else f"Col{i}"
+                        for i, cell in enumerate(raw_data[0])
+                    ]
                     rows: List[Dict[str, Any]] = []
                     truncated = False
 
@@ -191,14 +312,25 @@ def _extract_pdf(file_path: str, source_id: str, table_index_start: int) -> List
                         if len(rows) >= TABLE_MAX_ROWS:
                             truncated = True
                             logger.warning(
-                                f"PDF extractor: row limit {TABLE_MAX_ROWS} reached on page {page_num + 1}; truncating"
+                                f"PDF extractor: row limit {TABLE_MAX_ROWS} reached "
+                                f"on page {page_num + 1}; truncating"
                             )
                             break
-                        row_dict = {headers[i]: str(cell).strip() if cell else "" for i, cell in enumerate(raw_row)}
+                        row_dict = {
+                            headers[i]: str(cell).strip() if cell else ""
+                            for i, cell in enumerate(raw_row)
+                            if i < len(headers)
+                        }
                         rows.append(row_dict)
 
                     if not rows:
                         continue
+
+                    # Apply column cap (Phase 2)
+                    headers, rows, truncated = _apply_col_cap(
+                        headers, rows, truncated,
+                        context=f"{file_path} page {page_num + 1}"
+                    )
 
                     table_id = f"{source_id}_table_{global_idx}"
                     global_idx += 1
@@ -218,7 +350,8 @@ def _extract_pdf(file_path: str, source_id: str, table_index_start: int) -> List
                     )
             except Exception as exc:
                 logger.warning(
-                    f"PDF extractor: table extraction failed on page {page_num + 1} of '{file_path}': {exc}"
+                    f"PDF extractor: table extraction failed on page {page_num + 1} "
+                    f"of '{file_path}': {exc}"
                 )
                 # Continue to next page — never raise
     finally:
@@ -227,7 +360,7 @@ def _extract_pdf(file_path: str, source_id: str, table_index_start: int) -> List
     return tables
 
 
-# ── DOCX extractor ─────────────────────────────────────────────────────────────
+# ── DOCX extractor ────────────────────────────────────────────────────────────
 
 def _extract_docx(file_path: str, source_id: str, table_index_start: int) -> List[ExtractedTable]:
     """
@@ -269,7 +402,8 @@ def _extract_docx(file_path: str, source_id: str, table_index_start: int) -> Lis
             if len(rows) >= TABLE_MAX_ROWS:
                 truncated = True
                 logger.warning(
-                    f"DOCX extractor: row limit {TABLE_MAX_ROWS} reached in table {table_offset} of '{file_path}'; truncating"
+                    f"DOCX extractor: row limit {TABLE_MAX_ROWS} reached in "
+                    f"table {table_offset} of '{file_path}'; truncating"
                 )
                 break
             # Pad short rows to match header count
@@ -278,6 +412,146 @@ def _extract_docx(file_path: str, source_id: str, table_index_start: int) -> Lis
 
         if not rows:
             continue
+
+        # Apply column cap (Phase 2)
+        headers, rows, truncated = _apply_col_cap(
+            headers, rows, truncated,
+            context=f"{file_path} table {table_offset}"
+        )
+
+        table_id = f"{source_id}_table_{table_index_start + table_offset}"
+        tables.append(
+            ExtractedTable(
+                table_id=table_id,
+                source_id=source_id,
+                page_number=None,
+                sheet_name=None,
+                column_headers=headers,
+                row_data=rows,
+                markdown_repr=_to_markdown(headers, rows),
+                row_count=len(rows),
+                col_count=len(headers),
+                truncated=truncated,
+            )
+        )
+
+    return tables
+
+
+# ── HTML extractor (Phase 2A) ─────────────────────────────────────────────────
+
+class _HTMLTableParser(HTMLParser):
+    """
+    Minimal stdlib html.parser-based table extractor.
+
+    Parses <table> elements into a list of row lists.  Handles nested tables
+    by tracking depth: inner <table> elements are flattened (their cells are
+    treated as plain text).  Only top-level tables are emitted as separate
+    ExtractedTable records.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._depth: int = 0                   # nesting depth of <table> elements
+        self._current_row: List[str] = []
+        self._current_cell: List[str] = []
+        self._current_table: List[List[str]] = []
+        self.tables: List[List[List[str]]] = []  # completed top-level tables
+        self._in_cell = False
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "table":
+            self._depth += 1
+            if self._depth == 1:
+                # Start a fresh top-level table
+                self._current_table = []
+        elif tag in ("tr",) and self._depth == 1:
+            self._current_row = []
+        elif tag in ("td", "th") and self._depth == 1:
+            self._current_cell = []
+            self._in_cell = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "table":
+            if self._depth == 1 and self._current_table:
+                self.tables.append(self._current_table)
+                self._current_table = []
+            self._depth = max(0, self._depth - 1)
+        elif tag == "tr" and self._depth == 1:
+            if self._current_row:
+                self._current_table.append(self._current_row)
+            self._current_row = []
+        elif tag in ("td", "th") and self._depth == 1:
+            cell_text = " ".join(self._current_cell).strip()
+            self._current_row.append(cell_text)
+            self._current_cell = []
+            self._in_cell = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            stripped = data.strip()
+            if stripped:
+                self._current_cell.append(stripped)
+
+
+def _extract_html(file_path: str, source_id: str, table_index_start: int) -> List[ExtractedTable]:
+    """
+    Extract tables from an HTML file using stdlib html.parser.
+
+    • page_number and sheet_name are both None (HTML has no page/sheet concept).
+    • Nested tables are flattened — inner cells appear as text in the outer cell.
+    • Malformed HTML returns [] with a warning instead of raising.
+    """
+    try:
+        with open(file_path, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as exc:
+        logger.warning(f"HTML extractor: could not read '{file_path}': {exc}")
+        return []
+
+    parser = _HTMLTableParser()
+    try:
+        parser.feed(content)
+    except Exception as exc:
+        logger.warning(f"HTML extractor: parsing failed for '{file_path}': {exc}")
+        return []
+
+    if not parser.tables:
+        logger.debug(f"HTML extractor: no <table> elements found in '{file_path}'")
+        return []
+
+    tables: List[ExtractedTable] = []
+    for table_offset, raw_table in enumerate(parser.tables):
+        if len(raw_table) < 2:
+            # Need header row + at least one data row
+            continue
+
+        headers = [str(h) if h else f"Col{i}" for i, h in enumerate(raw_table[0])]
+        if not any(h.strip() for h in headers):
+            continue  # Skip tables with all-blank header rows
+
+        truncated = False
+        rows: List[Dict[str, Any]] = []
+        for raw_row in raw_table[1:]:
+            if len(rows) >= TABLE_MAX_ROWS:
+                truncated = True
+                logger.warning(
+                    f"HTML extractor: row limit {TABLE_MAX_ROWS} reached in "
+                    f"table {table_offset} of '{file_path}'; truncating"
+                )
+                break
+            # Pad short rows to match header count
+            padded = list(raw_row) + [""] * max(0, len(headers) - len(raw_row))
+            rows.append({headers[i]: padded[i] for i in range(len(headers))})
+
+        if not rows:
+            continue
+
+        # Apply column cap (Phase 2)
+        headers, rows, truncated = _apply_col_cap(
+            headers, rows, truncated,
+            context=f"{file_path} table {table_offset}"
+        )
 
         table_id = f"{source_id}_table_{table_index_start + table_offset}"
         tables.append(
@@ -323,15 +597,22 @@ def extract_tables_from_source(file_path: str, source_id: str) -> List[Extracted
     try:
         if ext == ".csv":
             return _extract_csv(file_path, source_id, 0)
-        elif ext in (".xlsx", ".xls"):
+        elif ext == ".xlsx":
             return _extract_xlsx(file_path, source_id, 0)
+        elif ext == ".xls":
+            # .xls is the legacy Excel binary format; openpyxl cannot read it.
+            # xlrd is deliberately not added — see _extract_xls() for rationale.
+            return _extract_xls(file_path, source_id, 0)
         elif ext == ".pdf":
             return _extract_pdf(file_path, source_id, 0)
         elif ext == ".docx":
             return _extract_docx(file_path, source_id, 0)
+        elif ext in (".html", ".htm"):
+            return _extract_html(file_path, source_id, 0)
         else:
             logger.debug(
-                f"Table extractor: no extractor registered for extension '{ext}'; returning empty list"
+                f"Table extractor: no extractor registered for extension '{ext}'; "
+                "returning empty list"
             )
             return []
     except Exception as exc:

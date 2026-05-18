@@ -11,6 +11,7 @@ from typing_extensions import Annotated, TypedDict
 
 from open_notebook.utils.docx_table_extractor import extract_docx_with_tables
 from open_notebook.utils.pdf_table_preserver import extract_pdf_with_tables
+from open_notebook.config import TABLES_MARKDOWN_MAX_CHARS
 from open_notebook.utils.table_extractor_registry import (
     ExtractedTable,
     extract_tables_from_source,
@@ -204,6 +205,8 @@ async def extract_tables(state: SourceState) -> dict:
                 page_number=table.page_number,
                 sheet_name=table.sheet_name,
                 column_headers=table.column_headers,
+                # Phase 2: persist original (pre-dedup) headers when present
+                original_headers=table.original_headers,
                 row_data=table.row_data,
                 markdown_repr=table.markdown_repr,
                 row_count=table.row_count,
@@ -229,7 +232,42 @@ async def extract_tables(state: SourceState) -> dict:
                 f"extract_tables: failed to save SourceTable for table_id='{table.table_id}': {exc}"
             )
 
-    tables_markdown = "\n\n".join(markdown_parts) if markdown_parts else None
+    # Phase 2: assemble tables_markdown with a hard character cap.
+    # We stop at the last complete table boundary before TABLES_MARKDOWN_MAX_CHARS
+    # and append a truncation marker. This keeps source.tables_markdown bounded
+    # regardless of how many tables were extracted.
+    if not markdown_parts:
+        tables_markdown = None
+    else:
+        assembled: List[str] = []
+        running_chars = 0
+        separator = "\n\n"
+        sep_len = len(separator)
+        omitted = 0
+
+        for part in markdown_parts:
+            # Account for the separator that joins parts
+            candidate_addition = (sep_len if assembled else 0) + len(part)
+            if running_chars + candidate_addition > TABLES_MARKDOWN_MAX_CHARS:
+                omitted = len(markdown_parts) - len(assembled)
+                logger.warning(
+                    f"extract_tables: tables_markdown cap ({TABLES_MARKDOWN_MAX_CHARS} chars) "
+                    f"reached for source '{source_id}'; {omitted} table(s) omitted"
+                )
+                break
+            assembled.append(part)
+            running_chars += candidate_addition
+
+        tables_markdown = separator.join(assembled)
+        if omitted > 0:
+            tables_markdown += (
+                f"\n\n<!-- tables_markdown truncated: {omitted} table(s) omitted "
+                f"(OPEN_NOTEBOOK_TABLES_MARKDOWN_MAX_CHARS={TABLES_MARKDOWN_MAX_CHARS}) -->"
+            )
+        # Edge case: zero tables fit (first table alone exceeds the cap)
+        if not assembled:
+            tables_markdown = None
+
     return {"extracted_tables": tables, "tables_markdown": tables_markdown}
 
 
