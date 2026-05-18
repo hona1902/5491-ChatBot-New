@@ -292,7 +292,7 @@ class SourceTable(ObjectModel):
     """Structured table extracted from a Source during ingestion."""
 
     table_name: ClassVar[str] = "source_table"
-    source: Optional[str] = None  # RecordID of parent source, stored as str
+    source: Optional[str] = None  # RecordID of parent source, stored as str in Python
     table_id: str = ""
     page_number: Optional[int] = None
     sheet_name: Optional[str] = None
@@ -306,6 +306,31 @@ class SourceTable(ObjectModel):
     row_count: int = 0
     col_count: int = 0
     truncated: bool = False
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def parse_source(cls, value):
+        """Convert RecordID → str when reading back from SurrealDB."""
+        if value is None:
+            return None
+        if isinstance(value, RecordID):
+            return str(value)
+        return str(value) if value else None
+
+    def _prepare_save_data(self) -> dict:
+        """Convert source str → RecordID before writing to SurrealDB.
+
+        SurrealDB schema declares: source_table.source REFERENCES record<source>
+        Sending a plain string causes:
+          'Found \'source:abc\' for field `source`, but expected a record<source>'
+        We must pass a RecordID object so the driver sends the correct wire type.
+        Pattern is identical to Source._prepare_save_data (command field) and
+        Note._prepare_save_data (owner_id field).
+        """
+        data = super()._prepare_save_data()
+        if data.get("source") is not None:
+            data["source"] = ensure_record_id(data["source"])
+        return data
 
     @classmethod
     async def get_for_source(cls, source_id: str) -> "List[SourceTable]":

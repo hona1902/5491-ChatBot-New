@@ -181,6 +181,13 @@ export function useDeleteSource() {
   return useMutation({
     mutationFn: (id: string) => sourcesApi.delete(id),
     onSuccess: (_, id) => {
+      // Cancel the status polling for the deleted source immediately.
+      // Without this, the still-mounted SourceCard's useSourceStatus hook
+      // fires one more poll, gets 404, and enters an error state.
+      // removeQueries evicts the cache entry entirely so the next refetch
+      // interval never fires.
+      queryClient.removeQueries({ queryKey: ['sources', id, 'status'] })
+
       // Invalidate ALL sources queries (both general and notebook-specific)
       queryClient.invalidateQueries({ queryKey: ['sources'] })
       // Also invalidate the specific source
@@ -237,8 +244,11 @@ export function useSourceStatus(sourceId: string, enabled = true) {
     queryFn: () => sourcesApi.status(sourceId),
     enabled: !!sourceId && enabled,
     refetchInterval: (query) => {
+      // Stop polling immediately if the query is in an error state
+      // (e.g. source was deleted and the last poll returned 404).
+      if (query.state.status === 'error') return false
+
       // Auto-refresh every 2 seconds if processing
-      // The query.state.data contains the SourceStatusResponse
       const data = query.state.data as SourceStatusResponse | undefined
       if (data?.status === 'running' || data?.status === 'queued' || data?.status === 'new') {
         return 2000
@@ -248,7 +258,7 @@ export function useSourceStatus(sourceId: string, enabled = true) {
     },
     staleTime: 0, // Always consider status data stale for real-time updates
     retry: (failureCount, error) => {
-      // Don't retry on 404 (source not found)
+      // Don't retry on 404 (source not found / deleted)
       const axiosError = error as { response?: { status?: number } }
       if (axiosError?.response?.status === 404) {
         return false

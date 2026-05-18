@@ -431,5 +431,131 @@ class TestEpisodeProfile:
         assert profile.num_segments == 5
 
 
+
+# ============================================================================
+# TEST SUITE 10: SourceTable Persistence — record<source> type fix
+# ============================================================================
+
+
+class TestSourceTablePersistence:
+    """Tests for the SourceTable.source field record<source> fix.
+
+    Root cause: SurrealDB schema declares source_table.source as record<source>.
+    Before the fix, _prepare_save_data() emitted source as a plain Python str
+    ("source:abc"), causing SurrealDB to reject it:
+      'Found \\'source:abc\\' for field `source`, but expected a record<source>'
+
+    After the fix:
+    - _prepare_save_data() converts source str → RecordID via ensure_record_id()
+    - field_validator parse_source converts RecordID → str on DB read-back
+    """
+
+    def test_prepare_save_data_converts_source_to_record_id(self):
+        """_prepare_save_data must return a RecordID, not a plain str, for source.
+
+        This directly prevents the SurrealDB 'expected a record<source>' error.
+        """
+        from surrealdb import RecordID
+        from open_notebook.domain.notebook import SourceTable
+
+        st = SourceTable(
+            source="source:e67p39vkqovazykkqmpb",
+            table_id="source:e67p39vkqovazykkqmpb_table_0",
+            column_headers=["Name", "Score"],
+            row_data=[{"Name": "Alice", "Score": "95"}],
+            markdown_repr="| Name | Score |\n|---|---|\n| Alice | 95 |",
+            row_count=1,
+            col_count=2,
+        )
+        data = st._prepare_save_data()
+
+        # source MUST be a RecordID, not a plain string
+        assert isinstance(data["source"], RecordID), (
+            f"Expected RecordID but got {type(data['source']).__name__}: {data['source']!r}. "
+            "Plain strings cause SurrealDB 'expected a record<source>' errors."
+        )
+
+    def test_prepare_save_data_source_record_id_has_correct_table(self):
+        """The RecordID emitted for source must have table='source'."""
+        from surrealdb import RecordID
+        from open_notebook.domain.notebook import SourceTable
+
+        st = SourceTable(
+            source="source:abc123",
+            table_id="source:abc123_table_0",
+        )
+        data = st._prepare_save_data()
+        record = data["source"]
+        assert isinstance(record, RecordID)
+        assert str(record) == "source:abc123", (
+            f"Expected 'source:abc123' but got '{record}'"
+        )
+
+    def test_prepare_save_data_source_none_is_omitted(self):
+        """When source is None it should be absent from _prepare_save_data output."""
+        from open_notebook.domain.notebook import SourceTable
+
+        st = SourceTable(table_id="orphan_table_0")
+        data = st._prepare_save_data()
+        # None fields are excluded by the base _prepare_save_data
+        assert "source" not in data or data.get("source") is None
+
+    def test_parse_source_converts_recordid_to_str(self):
+        """parse_source field_validator must accept a RecordID (returned from DB)."""
+        from surrealdb import RecordID
+        from open_notebook.domain.notebook import SourceTable
+
+        record_id = RecordID("source", "abc123")
+        # Constructing with a RecordID value — validator must convert it to str
+        st = SourceTable(
+            source=record_id,
+            table_id="source:abc123_table_0",
+        )
+        assert isinstance(st.source, str), (
+            f"Expected str but got {type(st.source).__name__}"
+        )
+        assert st.source == "source:abc123"
+
+    def test_parse_source_none_stays_none(self):
+        """parse_source validator must pass None through unchanged."""
+        from open_notebook.domain.notebook import SourceTable
+
+        st = SourceTable(source=None, table_id="orphan_table_0")
+        assert st.source is None
+
+    def test_parse_source_string_stays_string(self):
+        """parse_source validator must accept a plain str and keep it as str."""
+        from open_notebook.domain.notebook import SourceTable
+
+        st = SourceTable(source="source:xyz", table_id="test_table")
+        assert st.source == "source:xyz"
+        assert isinstance(st.source, str)
+
+    def test_roundtrip_source_field_string_in_recordid_out(self):
+        """Full round-trip: string in Python model → RecordID in DB payload."""
+        from surrealdb import RecordID
+        from open_notebook.domain.notebook import SourceTable
+
+        source_id = "source:mytest123"
+        st = SourceTable(
+            source=source_id,
+            table_id=f"{source_id}_table_0",
+            column_headers=["Col1"],
+            row_data=[{"Col1": "val"}],
+            markdown_repr="| Col1 |\n|---|\n| val |",
+            row_count=1,
+            col_count=1,
+        )
+
+        # Python model: source is a str
+        assert isinstance(st.source, str)
+        assert st.source == source_id
+
+        # DB payload: source is a RecordID
+        payload = st._prepare_save_data()
+        assert isinstance(payload["source"], RecordID)
+        assert str(payload["source"]) == source_id
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
