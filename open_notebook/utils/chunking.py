@@ -29,6 +29,80 @@ from loguru import logger
 from .token_utils import token_count
 
 
+def chunk_table(table) -> List[str]:
+    """
+    Chunk an ExtractedTable into one GFM Markdown string per data row.
+
+    Each returned string has the form::
+
+        | Col A | Col B | Col C |
+        |-------|-------|-------|
+        | val1  | val2  | val3  |
+
+    The token limit per chunk is relaxed to ``CHUNK_SIZE * 3`` to accommodate
+    wide rows.  If a single row exceeds this limit after construction, cell
+    values are truncated with a ``[truncated]`` marker and a warning is logged.
+
+    Args:
+        table: An ``ExtractedTable``-compatible object with ``column_headers``
+               and ``row_data`` attributes.
+
+    Returns:
+        A list of Markdown strings, one per data row.  Returns an empty list
+        if the table has no headers or no data rows.
+    """
+    headers = list(table.column_headers)
+    rows = list(table.row_data)
+
+    if not headers or not rows:
+        return []
+
+    table_token_limit = CHUNK_SIZE * 3
+
+    # Pre-build header and separator lines (shared across all chunks)
+    header_line = "| " + " | ".join(str(h) for h in headers) + " |"
+    separator_line = "|" + "|".join("---" for _ in headers) + "|"
+
+    chunks: List[str] = []
+    for row_idx, row in enumerate(rows):
+        values = [str(row.get(h, "")) for h in headers]
+        data_line = "| " + " | ".join(values) + " |"
+        chunk = "\n".join([header_line, separator_line, data_line])
+
+        if token_count(chunk) > table_token_limit:
+            # Cell-value truncation — only reached when the assembled chunk
+            # (header + separator + data row) already exceeds CHUNK_SIZE * 3
+            # tokens.  This is uncommon: it requires an unusually wide row with
+            # many long free-text cells.
+            #
+            # Why 80 chars per cell?  It keeps each truncated cell below ~20
+            # tokens while still conveying enough context for semantic search.
+            # Exact / complete cell values are always available in the
+            # source_table.row_data record and are used by table_exact_lookup()
+            # in source_chat — this truncation only affects the embedding chunk,
+            # not the stored structured data.
+            truncated_values = []
+            for v in values:
+                if token_count(v) > 20:  # per-cell threshold ≈ 80 tokens budget
+                    truncated_values.append(v[:80] + " [truncated]")
+                else:
+                    truncated_values.append(v)
+            data_line = "| " + " | ".join(truncated_values) + " |"
+            chunk = "\n".join([header_line, separator_line, data_line])
+            logger.warning(
+                f"chunk_table: row {row_idx} of table '{getattr(table, 'table_id', '?')}' "
+                f"exceeded token limit ({table_token_limit}); cell values truncated"
+            )
+
+        chunks.append(chunk)
+
+    logger.debug(
+        f"chunk_table: produced {len(chunks)} row-chunks for table "
+        f"'{getattr(table, 'table_id', '?')}'"
+    )
+    return chunks
+
+
 def _get_chunk_size() -> int:
     """Get chunk size from environment variable or use default."""
     chunk_size_str = os.getenv("OPEN_NOTEBOOK_CHUNK_SIZE")

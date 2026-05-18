@@ -1,0 +1,29 @@
+-- Migration 16: Table-aware Q&A — Phase 1A
+-- Adds source_table, extends source_embedding, and adds tables_markdown to source.
+
+-- ── source_table ────────────────────────────────────────────────────────────
+DEFINE TABLE source_table SCHEMAFULL;
+DEFINE FIELD source         ON source_table TYPE record<source>;
+DEFINE FIELD table_id       ON source_table TYPE string;
+DEFINE FIELD page_number    ON source_table TYPE option<int>;
+DEFINE FIELD sheet_name     ON source_table TYPE option<string>;
+DEFINE FIELD column_headers ON source_table TYPE array<string>;
+DEFINE FIELD row_data       ON source_table TYPE array<object>;
+DEFINE FIELD markdown_repr  ON source_table TYPE string;
+DEFINE FIELD row_count      ON source_table TYPE int;
+DEFINE FIELD col_count      ON source_table TYPE int;
+DEFINE FIELD truncated      ON source_table TYPE bool DEFAULT false;
+DEFINE FIELD created        ON source_table TYPE option<datetime>;
+DEFINE FIELD updated        ON source_table TYPE option<datetime>;
+
+DEFINE INDEX source_table_source_idx ON source_table FIELDS source;
+
+-- ── source_embedding — optional table-row metadata ──────────────────────────
+DEFINE FIELD IF NOT EXISTS chunk_type  ON source_embedding TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS table_id    ON source_embedding TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS row_index   ON source_embedding TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS page_number ON source_embedding TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS sheet_name  ON source_embedding TYPE option<string>;
+
+-- ── source — tables_markdown field ──────────────────────────────────────────
+DEFINE FIELD IF NOT EXISTS tables_markdown ON source TYPE option<string>;

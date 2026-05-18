@@ -9,9 +9,16 @@ from langgraph.types import Send
 from loguru import logger
 from typing_extensions import Annotated, TypedDict
 
+from open_notebook.utils.docx_table_extractor import extract_docx_with_tables
+from open_notebook.utils.pdf_table_preserver import extract_pdf_with_tables
+from open_notebook.utils.table_extractor_registry import (
+    ExtractedTable,
+    extract_tables_from_source,
+)
+
 from open_notebook.ai.models import Model, ModelManager
 from open_notebook.domain.content_settings import ContentSettings
-from open_notebook.domain.notebook import Asset, Source
+from open_notebook.domain.notebook import Asset, Source, SourceTable
 from open_notebook.domain.transformation import Transformation
 from open_notebook.graphs.transformation import graph as transform_graph
 
@@ -24,6 +31,8 @@ class SourceState(TypedDict):
     source: Source
     transformation: Annotated[list, operator.add]
     embed: bool
+    extracted_tables: List[ExtractedTable]  # populated by extract_tables node
+    tables_markdown: Optional[str]           # populated by extract_tables node
 
 
 class TransformationState(TypedDict):
@@ -77,6 +86,55 @@ async def content_process(state: SourceState) -> dict:
 
     processed_state = await extract_content(content_state)
 
+    # ---- Custom table-aware post-processing ----
+    # content_core's DOCX extractor skips tables entirely; its PDF extractor
+    # converts tables to Markdown but then clean_pdf_text() destroys them.
+    # We run our own extractors and replace processed_state.content if they succeed.
+    file_path: str = processed_state.file_path or ""
+    identified_type: str = processed_state.identified_type or ""
+
+    DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    PDF_MIME = "application/pdf"
+
+    if file_path and (identified_type == DOCX_MIME or file_path.lower().endswith(".docx")):
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            custom_content = await loop.run_in_executor(
+                None, extract_docx_with_tables, file_path
+            )
+            if custom_content and custom_content.strip():
+                processed_state.content = custom_content
+                logger.debug("DOCX table extractor: replaced content with table-aware output")
+            else:
+                logger.warning(
+                    "DOCX table extractor: returned empty content — keeping content_core output"
+                )
+        except Exception as exc:
+            logger.warning(
+                f"DOCX table extractor failed, falling back to content_core output: {exc}"
+            )
+
+    elif file_path and (identified_type == PDF_MIME or file_path.lower().endswith(".pdf")):
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            custom_content = await loop.run_in_executor(
+                None, extract_pdf_with_tables, file_path
+            )
+            if custom_content and custom_content.strip():
+                processed_state.content = custom_content
+                logger.debug("PDF table preserver: replaced content with table-preserved output")
+            else:
+                logger.warning(
+                    "PDF table preserver: returned empty content — keeping content_core output"
+                )
+        except Exception as exc:
+            logger.warning(
+                f"PDF table preserver failed, falling back to content_core output: {exc}"
+            )
+    # ---- End custom table-aware post-processing ----
+
     if not processed_state.content or not processed_state.content.strip():
         url = processed_state.url or ""
         if url and ("youtube.com" in url or "youtu.be" in url):
@@ -94,6 +152,87 @@ async def content_process(state: SourceState) -> dict:
     return {"content_state": processed_state}
 
 
+async def extract_tables(state: SourceState) -> dict:
+    """
+    Non-blocking graph node: extract structured tables from the source file,
+    persist each as a source_table record, and assemble tables_markdown.
+
+    All failures are caught and logged — ingestion always continues.
+    """
+    content_state = state["content_state"]
+    file_path: str = getattr(content_state, "file_path", None) or ""
+    source_id: str = state["source_id"]
+
+    if not file_path:
+        logger.debug("extract_tables: no file_path in content_state; skipping table extraction")
+        return {"extracted_tables": [], "tables_markdown": None}
+
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        tables: List[ExtractedTable] = await loop.run_in_executor(
+            None, extract_tables_from_source, file_path, source_id
+        )
+    except Exception as exc:
+        logger.warning(f"extract_tables: dispatcher raised unexpectedly for '{file_path}': {exc}")
+        return {"extracted_tables": [], "tables_markdown": None}
+
+    if not tables:
+        logger.debug(f"extract_tables: no tables extracted from '{file_path}'")
+        return {"extracted_tables": [], "tables_markdown": None}
+
+    logger.info(f"extract_tables: persisting {len(tables)} table(s) for source '{source_id}'")
+
+    # Persist source_table records
+    from open_notebook.database.repository import ensure_record_id, repo_query
+
+    # Clear any existing source_table records for idempotency
+    try:
+        await repo_query(
+            "DELETE source_table WHERE source = $source_id",
+            {"source_id": ensure_record_id(source_id)},
+        )
+    except Exception as exc:
+        logger.warning(f"extract_tables: failed to clear old source_table records: {exc}")
+
+    markdown_parts: List[str] = []
+    for table in tables:
+        try:
+            st = SourceTable(
+                source=str(ensure_record_id(source_id)),
+                table_id=table.table_id,
+                page_number=table.page_number,
+                sheet_name=table.sheet_name,
+                column_headers=table.column_headers,
+                row_data=table.row_data,
+                markdown_repr=table.markdown_repr,
+                row_count=table.row_count,
+                col_count=table.col_count,
+                truncated=table.truncated,
+            )
+            await st.save()
+            logger.debug(f"extract_tables: saved source_table record for table_id='{table.table_id}'")
+
+            # Build markdown header comment for this table
+            label_parts = [f"Table: {table.table_id}"]
+            if table.page_number is not None:
+                label_parts.append(f"Page {table.page_number}")
+            if table.sheet_name:
+                label_parts.append(f"Sheet: {table.sheet_name}")
+            if table.truncated:
+                label_parts.append("[truncated]")
+            markdown_parts.append(
+                f"<!-- {', '.join(label_parts)} -->\n{table.markdown_repr}"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"extract_tables: failed to save SourceTable for table_id='{table.table_id}': {exc}"
+            )
+
+    tables_markdown = "\n\n".join(markdown_parts) if markdown_parts else None
+    return {"extracted_tables": tables, "tables_markdown": tables_markdown}
+
+
 async def save_source(state: SourceState) -> dict:
     content_state = state["content_state"]
 
@@ -105,6 +244,14 @@ async def save_source(state: SourceState) -> dict:
     # Update the source with processed content
     source.asset = Asset(url=content_state.url, file_path=content_state.file_path)
     source.full_text = content_state.content
+
+    # Write tables_markdown from extract_tables node (independent of full_text truncation)
+    tables_markdown = state.get("tables_markdown")
+    if tables_markdown:
+        source.tables_markdown = tables_markdown
+        logger.debug(
+            f"save_source: writing tables_markdown ({len(tables_markdown)} chars) for source {source.id}"
+        )
 
     # Preserve user-set title; only overwrite placeholder or empty titles
     if content_state.title and (not source.title or source.title == "Processing..."):
@@ -173,11 +320,13 @@ workflow = StateGraph(SourceState)
 
 # Add nodes
 workflow.add_node("content_process", content_process)
+workflow.add_node("extract_tables", extract_tables)
 workflow.add_node("save_source", save_source)
 workflow.add_node("transform_content", transform_content)
 # Define the graph edges
 workflow.add_edge(START, "content_process")
-workflow.add_edge("content_process", "save_source")
+workflow.add_edge("content_process", "extract_tables")
+workflow.add_edge("extract_tables", "save_source")
 workflow.add_conditional_edges(
     "save_source", trigger_transformations, ["transform_content"]
 )

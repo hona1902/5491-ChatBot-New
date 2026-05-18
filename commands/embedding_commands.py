@@ -1,5 +1,5 @@
 import time
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 from loguru import logger
 from pydantic import BaseModel
@@ -9,7 +9,7 @@ from open_notebook.ai.models import model_manager
 from open_notebook.database.repository import ensure_record_id, repo_insert, repo_query
 from open_notebook.exceptions import ConfigurationError
 from open_notebook.domain.notebook import Note, Source, SourceInsight
-from open_notebook.utils.chunking import ContentType, chunk_text, detect_content_type
+from open_notebook.utils.chunking import ContentType, chunk_table, chunk_text, detect_content_type
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
 
 
@@ -304,6 +304,23 @@ async def embed_insight_command(input_data: EmbedInsightInput) -> EmbedInsightOu
         raise
 
 
+class _TableProxy:
+    """
+    Lightweight duck-typed wrapper around a raw source_table dict record so that
+    ``chunk_table()`` can access ``.column_headers``, ``.row_data``, and
+    ``.table_id`` without requiring a full ``SourceTable`` domain-model import
+    here.  Defined at module level to avoid re-creating the class on every loop
+    iteration (which was a code smell with no functional impact).
+    """
+
+    __slots__ = ("table_id", "column_headers", "row_data")
+
+    def __init__(self, d: dict) -> None:
+        self.table_id: str = d.get("table_id", "")
+        self.column_headers: list = d.get("column_headers", [])
+        self.row_data: list = d.get("row_data", [])
+
+
 @command(
     "embed_source",
     app="open_notebook",
@@ -321,15 +338,23 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
     Generate and store embeddings for a source document.
 
     Creates multiple chunk embeddings stored in the source_embedding table.
-    Uses content-type aware chunking based on file extension or content heuristics.
+    Supports two chunk types:
+    - Prose chunks: split from ``source.full_text`` using content-type aware chunking.
+    - Table-row chunks: one per data row from ``source_table`` records, generated
+      by ``chunk_table()`` with explicit metadata (chunk_type, table_id, row_index,
+      page_number, sheet_name).
+
+    If the source has no ``source_table`` records, behaviour is identical to the
+    original implementation (backward compatible).
 
     Flow:
     1. Load Source by ID
     2. DELETE existing source_embedding records for this source
     3. Detect content type from file path or content
-    4. Chunk text using appropriate splitter
-    5. Generate embeddings for all chunks in batches
-    6. Bulk INSERT source_embedding records
+    4. Chunk prose text using appropriate splitter
+    5. Query source_table records; chunk each table row-by-row
+    6. Generate embeddings for ALL chunks in a single batch
+    7. Bulk INSERT source_embedding records (two separate dict shapes)
 
     Retry Strategy:
     - Retries up to 5 times for transient failures (network, timeout, etc.)
@@ -361,44 +386,119 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
         content_type = detect_content_type(source.full_text, file_path)
         logger.debug(f"Detected content type: {content_type.value}")
 
-        # 4. Chunk text using appropriate splitter
-        chunks = chunk_text(source.full_text, content_type=content_type)
-        total_chunks = len(chunks)
+        # 4. Chunk prose text using appropriate splitter
+        prose_chunks = chunk_text(source.full_text, content_type=content_type)
 
         # Log chunk statistics for debugging
-        chunk_sizes = [len(c) for c in chunks]
+        chunk_sizes = [len(c) for c in prose_chunks]
         logger.info(
-            f"Created {total_chunks} chunks for source {input_data.source_id} "
+            f"Created {len(prose_chunks)} prose chunks for source {input_data.source_id} "
             f"(sizes: min={min(chunk_sizes) if chunk_sizes else 0}, "
             f"max={max(chunk_sizes) if chunk_sizes else 0}, "
             f"avg={sum(chunk_sizes)//len(chunk_sizes) if chunk_sizes else 0} chars)"
         )
 
-        if total_chunks == 0:
+        if len(prose_chunks) == 0:
             raise ValueError("No chunks created after splitting text")
 
-        # 5. Generate embeddings for all chunks in batches
-        cmd_id = get_command_id(input_data)
-        logger.debug(f"Generating embeddings for {total_chunks} chunks")
-        embeddings = await generate_embeddings(chunks, command_id=cmd_id)
+        # 5. Query source_table records; chunk each table row-by-row
+        # Each entry: (chunk_text, table_id, row_index, page_number, sheet_name)
+        table_chunk_meta: List[Tuple[str, str, int, Optional[int], Optional[str]]] = []
 
-        # Verify we got embeddings for all chunks
-        if len(embeddings) != len(chunks):
-            raise ValueError(
-                f"Embedding count mismatch: got {len(embeddings)} embeddings "
-                f"for {len(chunks)} chunks"
+        try:
+            table_records_raw = await repo_query(
+                "SELECT * FROM source_table WHERE source = $source_id",
+                {"source_id": ensure_record_id(input_data.source_id)},
+            )
+            table_records = table_records_raw or []
+        except Exception as exc:
+            logger.warning(
+                f"embed_source: failed to query source_table for {input_data.source_id}: {exc}. "
+                "Continuing with prose-only embedding."
+            )
+            table_records = []
+
+        if table_records:
+            logger.info(
+                f"Found {len(table_records)} source_table record(s) for source "
+                f"{input_data.source_id}; generating table-row chunks"
+            )
+            for tbl_raw in table_records:
+                tbl = _TableProxy(tbl_raw)
+                row_chunks = chunk_table(tbl)
+                tbl_page = tbl_raw.get("page_number")  # Optional[int]
+                tbl_sheet = tbl_raw.get("sheet_name")   # Optional[str]
+
+                for row_idx, row_chunk in enumerate(row_chunks):
+                    table_chunk_meta.append(
+                        (row_chunk, tbl.table_id, row_idx, tbl_page, tbl_sheet)
+                    )
+
+            logger.info(
+                f"embed_source: {len(table_chunk_meta)} total table-row chunks "
+                f"from {len(table_records)} table(s)"
+            )
+        else:
+            logger.debug(
+                f"embed_source: no source_table records for {input_data.source_id}; "
+                "prose-only mode"
             )
 
-        # 6. Bulk INSERT source_embedding records
-        records = [
-            {
-                "source": ensure_record_id(input_data.source_id),
-                "order": idx,
-                "content": chunk,
-                "embedding": embedding,
-            }
-            for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-        ]
+        # 6. Generate embeddings for ALL chunks in a single batch
+        all_chunk_texts = prose_chunks + [m[0] for m in table_chunk_meta]
+        total_chunks = len(all_chunk_texts)
+
+        cmd_id = get_command_id(input_data)
+        logger.debug(
+            f"Generating embeddings for {total_chunks} chunks "
+            f"({len(prose_chunks)} prose + {len(table_chunk_meta)} table-row)"
+        )
+        embeddings = await generate_embeddings(all_chunk_texts, command_id=cmd_id)
+
+        # Verify we got embeddings for all chunks
+        if len(embeddings) != total_chunks:
+            raise ValueError(
+                f"Embedding count mismatch: got {len(embeddings)} embeddings "
+                f"for {total_chunks} chunks"
+            )
+
+        # 7. Build records list using two distinct dict shapes and bulk INSERT
+        source_record_id = ensure_record_id(input_data.source_id)
+        records = []
+
+        # 7a. Prose records — no table metadata fields
+        for idx, (chunk, embedding) in enumerate(
+            zip(prose_chunks, embeddings[: len(prose_chunks)])
+        ):
+            records.append(
+                {
+                    "source": source_record_id,
+                    "order": idx,
+                    "content": chunk,
+                    "embedding": embedding,
+                }
+            )
+
+        # 7b. Table-row records — all five table metadata fields explicitly present
+        prose_count = len(prose_chunks)
+        for meta_idx, (row_chunk, table_id, row_idx, page_number, sheet_name) in enumerate(
+            table_chunk_meta
+        ):
+            global_idx = prose_count + meta_idx
+            embedding = embeddings[global_idx]
+            records.append(
+                {
+                    "source": source_record_id,
+                    "order": global_idx,
+                    "content": row_chunk,
+                    "embedding": embedding,
+                    "chunk_type": "table_row",
+                    "table_id": table_id,
+                    "row_index": row_idx,
+                    "page_number": page_number,
+                    "sheet_name": sheet_name,
+                }
+            )
 
         logger.debug(f"Inserting {len(records)} source_embedding records")
         await repo_insert("source_embedding", records)
@@ -406,7 +506,8 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
         processing_time = time.time() - start_time
         logger.info(
             f"Successfully embedded source {input_data.source_id}: "
-            f"{total_chunks} chunks in {processing_time:.2f}s"
+            f"{len(prose_chunks)} prose chunks + {len(table_chunk_meta)} table-row chunks "
+            f"in {processing_time:.2f}s"
         )
 
         return EmbedSourceOutput(
@@ -438,6 +539,8 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
             f"(command: {cmd_id}): {e}"
         )
         raise
+
+
 
 
 @command(

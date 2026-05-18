@@ -1,0 +1,11 @@
+-- Migration 16 down: remove table-aware Q&A additions
+
+REMOVE TABLE source_table;
+
+REMOVE FIELD chunk_type  ON source_embedding;
+REMOVE FIELD table_id    ON source_embedding;
+REMOVE FIELD row_index   ON source_embedding;
+REMOVE FIELD page_number ON source_embedding;
+REMOVE FIELD sheet_name  ON source_embedding;
+
+REMOVE FIELD tables_markdown ON source;

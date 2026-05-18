@@ -190,3 +190,76 @@
     cursor: pointer !important;
   }
 }
+
+/* ── Prose table styles ─────────────────────────────────────────────────────
+   Ensures Markdown GFM tables (rendered via react-markdown + remarkGfm)
+   display correctly in both light and dark mode.
+   The .prose class is applied by SourceDetailContent.tsx.
+   ─────────────────────────────────────────────────────────────────────── */
+@layer base {
+  .prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    overflow-x: auto;
+    display: block;
+  }
+
+  .prose thead {
+    background-color: var(--muted);
+  }
+
+  .prose th {
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    color: var(--foreground);
+  }
+
+  .prose td {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    color: var(--foreground);
+  }
+
+  /* Alternating row colours — light mode */
+  .prose tbody tr:nth-child(even) {
+    background-color: var(--muted);
+  }
+
+  .prose tbody tr:hover {
+    background-color: var(--accent);
+    transition: background-color 150ms ease;
+  }
+
+  /* Dark mode overrides */
+  .dark .prose table {
+    border-color: var(--border);
+  }
+
+  .dark .prose thead {
+    background-color: oklch(0.25 0.006 286.033);
+  }
+
+  .dark .prose th {
+    border-color: oklch(1 0 0 / 12%);
+    color: var(--foreground);
+  }
+
+  .dark .prose td {
+    border-color: oklch(1 0 0 / 10%);
+    color: var(--foreground);
+  }
+
+  .dark .prose tbody tr:nth-child(even) {
+    background-color: oklch(0.22 0.006 285.885);
+  }
+
+  .dark .prose tbody tr:hover {
+    background-color: oklch(0.29 0.008 286.033);
+  }
+}
+

@@ -288,6 +288,35 @@ class SourceInsight(ObjectModel):
         return note
 
 
+class SourceTable(ObjectModel):
+    """Structured table extracted from a Source during ingestion."""
+
+    table_name: ClassVar[str] = "source_table"
+    source: Optional[str] = None  # RecordID of parent source, stored as str
+    table_id: str = ""
+    page_number: Optional[int] = None
+    sheet_name: Optional[str] = None
+    column_headers: List[str] = Field(default_factory=list)
+    row_data: List[Dict[str, Any]] = Field(default_factory=list)
+    markdown_repr: str = ""
+    row_count: int = 0
+    col_count: int = 0
+    truncated: bool = False
+
+    @classmethod
+    async def get_for_source(cls, source_id: str) -> "List[SourceTable]":
+        """Fetch all source_table records for a given source ID."""
+        try:
+            result = await repo_query(
+                "SELECT * FROM source_table WHERE source = $source_id",
+                {"source_id": ensure_record_id(source_id)},
+            )
+            return [SourceTable(**row) for row in result] if result else []
+        except Exception as e:
+            logger.error(f"Error fetching tables for source {source_id}: {e}")
+            raise DatabaseOperationError(e)
+
+
 class Source(ObjectModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -296,6 +325,7 @@ class Source(ObjectModel):
     title: Optional[str] = None
     topics: Optional[List[str]] = Field(default_factory=list)
     full_text: Optional[str] = None
+    tables_markdown: Optional[str] = None
     command: Optional[Union[str, RecordID]] = Field(
         default=None, description="Link to surreal-commands processing job"
     )
@@ -535,7 +565,7 @@ class Source(ObjectModel):
                     f"File {file_path} not found for source {self.id}, skipping cleanup"
                 )
 
-        # Delete associated embeddings and insights to prevent orphaned records
+        # Delete associated embeddings, insights, and table records to prevent orphaned records
         try:
             source_id = ensure_record_id(self.id)
             await repo_query(
@@ -546,10 +576,14 @@ class Source(ObjectModel):
                 "DELETE source_insight WHERE source = $source_id",
                 {"source_id": source_id},
             )
-            logger.debug(f"Deleted embeddings and insights for source {self.id}")
+            await repo_query(
+                "DELETE source_table WHERE source = $source_id",
+                {"source_id": source_id},
+            )
+            logger.debug(f"Deleted embeddings, insights, and tables for source {self.id}")
         except Exception as e:
             logger.warning(
-                f"Failed to delete embeddings/insights for source {self.id}: {e}. "
+                f"Failed to delete embeddings/insights/tables for source {self.id}: {e}. "
                 "Continuing with source deletion."
             )
 

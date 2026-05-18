@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Table-aware Q&A — Phase 1A** (table extraction infrastructure)
+  - New `source_table` SurrealDB entity stores structured table data extracted during ingestion (fields: `source`, `table_id`, `page_number`, `sheet_name`, `column_headers`, `row_data`, `markdown_repr`, `row_count`, `col_count`, `truncated`)
+  - `source_embedding` schema extended with optional metadata fields: `chunk_type`, `table_id`, `row_index`, `page_number`, `sheet_name` (additive, fully backward-compatible)
+  - `source` record gains `tables_markdown: Optional[str]` field — stores concatenated GFM Markdown of all extracted tables, independent of `full_text`
+  - New `SourceTable` domain model in `open_notebook/domain/notebook.py` with `get_for_source()` classmethod; `Source.delete()` now cascade-deletes `source_table` records
+  - New `open_notebook/utils/table_extractor_registry.py` with `ExtractedTable` model and per-format extractors:
+    - **CSV** — stdlib `csv.DictReader` (no pandas)
+    - **XLSX** — `openpyxl` (already a transitive dependency)
+    - **PDF** — `fitz`/PyMuPDF `page.find_tables()` + `table.extract()` (same library as `pdf_table_preserver.py`)
+    - **DOCX** — `python-docx` XML traversal (`w:tbl` elements)
+    - All extractors respect `OPEN_NOTEBOOK_TABLE_MAX_ROWS` env var (default: 5000) and set `truncated=True` when row limit is reached
+  - New `extract_tables` graph node in `open_notebook/graphs/source.py` wired between `content_process` and `save_source`; persists `source_table` records and populates `source.tables_markdown`; all errors are caught and logged — ingestion always completes
+  - `_format_source_context()` in `graphs/source_chat.py` now appends a `## TABLE DATA` section to LLM context when `source.tables_markdown` is set; this section is **not** subject to the 5,000-char `full_text` truncation limit
+  - Database migration 16 registers all schema additions; rollback migration 16_down removes them cleanly
+- **Table-aware Q&A — Phase 1B** (table-aware chunking and embedding)
+  - New `chunk_table()` function in `open_notebook/utils/chunking.py`: one GFM Markdown chunk per data row (`header + separator + one_row`); relaxed token limit (`CHUNK_SIZE × 3`) per chunk; oversized cells truncated with `[truncated]` marker
+  - `embed_source_command` in `commands/embedding_commands.py` now queries `source_table` records and mixes table-row chunks with prose chunks in a single `generate_embeddings()` batch
+  - Table-row embedding records include five structured metadata fields: `chunk_type="table_row"`, `table_id`, `row_index`, `page_number`, `sheet_name`; prose records remain unchanged (no table fields)
+- **Table-aware Q&A — Phase 1C** (deterministic exact lookup in source_chat)
+  - New `open_notebook/utils/table_lookup.py` with `table_exact_lookup(query, source_id)`: restricted to CSV/XLSX sources; tokenises the query (stop-word filtered); case-insensitive cell-value scan; returns GFM Markdown of matched rows with Table/Page/Sheet labels, or `None` on no match; all exceptions swallowed — falls through to vector retrieval silently
+  - `graphs/source_chat.py` runs `table_exact_lookup` as a pre-LLM step; uses only the **latest `HumanMessage`** as the lookup query — `SystemMessage`, `AIMessage`, `ToolMessage`, and `FunctionMessage` content is explicitly excluded; prepends `## Verified Table Data` to the LLM context on a hit
+  - `prompts/ask/query_process.jinja` updated with table-grounding rules: prefer `chunk_type=table_row` chunks; cite `[Source, Table, Page, Sheet]`; state "not found in the available table data" rather than guessing
+  - `prompts/source_chat/system.jinja` updated with conditional table-grounding block when `## TABLE DATA` is present in context
+  - `prompts/ask/final_answer.jinja` updated to preserve table citations verbatim from sub-answers
+  - Phase 1 complete: 96 unit tests passing; no new Python dependencies introduced; `ask.py` unchanged
+
+### Fixed
+- Fix: Word tables no longer disappear when uploading DOCX; PDF tables now render correctly as Markdown tables
+  - DOCX: Added `open_notebook/utils/docx_table_extractor.py` which traverses `doc.element.body` XML to extract paragraphs and tables in document order, converting tables to GFM Markdown format (content_core's office.py only iterates `doc.paragraphs`, silently dropping all table content)
+  - PDF: Added `open_notebook/utils/pdf_table_preserver.py` which wraps Markdown table blocks in sentinel markers before `clean_pdf_text()` runs, then reassembles — preventing the regex clean pass from destroying `| col |` syntax
+  - Frontend: Added `.prose table/th/td` CSS with borders, padding, alternating row colours, and dark mode overrides
+
 ## [1.8.5] - 2026-04-14
 
 ### Changed

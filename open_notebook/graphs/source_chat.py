@@ -1,7 +1,7 @@
 from typing import Annotated, Dict, List, Optional
 
 from ai_prompter import Prompter
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -14,6 +14,7 @@ from open_notebook.graphs.checkpoint import get_memory
 from open_notebook.utils import clean_thinking_content
 from open_notebook.utils.context_builder import ContextBuilder
 from open_notebook.utils.error_classifier import classify_error
+from open_notebook.utils.table_lookup import table_exact_lookup
 from open_notebook.utils.text_utils import extract_text_content
 
 
@@ -87,6 +88,41 @@ async def _acall_model_with_source_context_inner(
     # Format context for the prompt
     formatted_context = _format_source_context(context_data)
 
+    # --- Phase 1C: Deterministic exact lookup (CSV/XLSX sources only) -------
+    # Run before the LLM call so verified cell-level data can anchor the answer.
+    # Returns None for non-structured sources, missing tables, or no cell match.
+    # Never raises — any error falls through silently to vector-based context.
+    verified_table_section: Optional[str] = None
+    if source_id:
+        last_user_message = ""
+        for msg in reversed(state.get("messages", [])):
+            # Use only genuine HumanMessage so SystemMessage / AIMessage content
+            # is never passed as the exact-lookup query.
+            if isinstance(msg, HumanMessage):
+                content = msg.content
+                last_user_message = content if isinstance(content, str) else str(content)
+                break
+
+        if last_user_message:
+            verified_table_section = await table_exact_lookup(
+                query=last_user_message, source_id=source_id
+            )
+
+    # Prepend Verified Table Data section to the formatted context so it
+    # appears before the ## SOURCE CONTENT block; the LLM sees it first and
+    # can use it as its primary reference for exact-value questions.
+    if verified_table_section:
+        formatted_context = (
+            "## Verified Table Data\n"
+            "The following rows were retrieved by deterministic exact lookup "
+            "from the structured source. Prefer these over prose for exact-value "
+            "questions. Cite the table/page/sheet when answering.\n\n"
+            + verified_table_section
+            + "\n\n"
+            + formatted_context
+        )
+    # -------------------------------------------------------------------------
+
     # Build prompt data for the template
     prompt_data = {
         "source": source.model_dump() if source else None,
@@ -152,6 +188,16 @@ def _format_source_context(context_data: Dict) -> str:
                     if len(full_text) > 5000:
                         full_text = full_text[:5000] + "...\n[Content truncated]"
                     context_parts.append(f"**Content:**\n{full_text}")
+                # Append tables_markdown AFTER the prose section so the
+                # 5,000-char truncation above never silently drops table data.
+                tables_markdown = source.get("tables_markdown")
+                if tables_markdown:
+                    context_parts.append("\n## TABLE DATA")
+                    context_parts.append(
+                        "The following structured tables were extracted from this source. "
+                        "Prefer these for exact-value questions.\n"
+                    )
+                    context_parts.append(tables_markdown)
                 context_parts.append("")  # Empty line for separation
 
     # Add insights

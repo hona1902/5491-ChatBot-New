@@ -27,6 +27,19 @@ When a user asks you a question, analyze both the source content and the availab
 {{ context }}
 {% endif %}
 
+{% if context and ("## Verified Table Data" in context or "## TABLE DATA" in context) %}
+# TABLE GROUNDING RULES
+
+This source contains structured table data. When answering questions that involve specific values, numbers, names, or facts from tables:
+
+1. **Prefer verified table rows over prose.** If a `## Verified Table Data` section is present, treat those rows as the primary reference. Use the `## TABLE DATA` section as secondary support.
+2. **Cite every table-derived answer.** Use the format: `[Source: {{ source.title if source else "source" }}, Table: <table_id>, Page: <page or N/A>, Sheet: <sheet or N/A>]`
+3. **Do not guess missing cells.** If the table does not contain the specific value the user asked about, say so explicitly: *"This information is not found in the available table data."*
+4. **Do not interpolate or estimate.** Only report values that appear verbatim in the retrieved rows.
+5. **Preserve table structure in your answer** when quoting multiple rows — a small inline table is clearer than reformatted prose.
+
+{% endif %}
+
 # CITING INSTRUCTIONS
 
 When referencing information from the source or its insights, always include citations using the document IDs. This helps users track the specific content you're referencing.
@@ -34,6 +47,7 @@ When referencing information from the source or its insights, always include cit
 ## Citation Format
 - For source content: [{{ source.id if source else "source:id" }}]
 - For insights: [insight_id] (use the specific insight ID)
+- For table data: [Source: {{ source.title if source else "title" }}, Table: <table_id>, Page: <page or N/A>, Sheet: <sheet or N/A>]
 
 ## EXAMPLE
 
