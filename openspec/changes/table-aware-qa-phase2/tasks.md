@@ -25,13 +25,13 @@
 
 ## 3. Semantic Retrieval Upgrade (table_lookup.py)
 
-- [ ] 3.1 Refactor `table_exact_lookup` in `open_notebook/utils/table_lookup.py` into two phases: (a) keyword pre-filter, (b) embedding similarity fallback
-- [ ] 3.2 Implement Phase 2 fallback: embed query with configured embedding model, query `source_embedding WHERE source=$id AND chunk_type="table_row"`, compute cosine similarity, return top-N rows above `TABLE_LOOKUP_SIMILARITY_THRESHOLD`
-- [ ] 3.3 Write unit test: keyword match found → Phase 2 is never called
-- [ ] 3.4 Write unit test: keyword miss but semantically similar row → Phase 2 returns matching row
-- [ ] 3.5 Write unit test: both phases miss → `None` returned
-- [ ] 3.6 Write unit test: non-CSV/XLSX source → `None` returned immediately, no embedding call
-- [ ] 3.7 Verify existing `source_chat.py` integration tests still pass with updated `table_exact_lookup`
+- [x] 3.1 Refactor `table_exact_lookup` in `open_notebook/utils/table_lookup.py` into two phases: (a) keyword pre-filter, (b) embedding similarity fallback
+- [x] 3.2 Implement Phase 2 fallback: embed query with configured embedding model, query `source_embedding WHERE source=$id AND chunk_type="table_row"`, compute cosine similarity, return top-N rows above `TABLE_LOOKUP_SIMILARITY_THRESHOLD`
+- [x] 3.3 Write unit test: keyword match found → Phase 2 is never called
+- [x] 3.4 Write unit test: keyword miss but semantically similar row → Phase 2 returns matching row
+- [x] 3.5 Write unit test: both phases miss → `None` returned
+- [x] 3.6 Write unit test: non-CSV/XLSX source → `None` returned immediately, no embedding call
+- [x] 3.7 Verify existing `source_chat.py` integration tests still pass with updated `table_exact_lookup`
 
 ## 4. Table API Endpoints (backend)
 
