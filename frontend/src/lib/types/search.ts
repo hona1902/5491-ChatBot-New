@@ -35,6 +35,8 @@ export interface AskRequest {
   strategy_model: string
   answer_model: string
   final_answer_model: string
+  /** Wave 5A: optional notebook scope. Omit or pass undefined to preserve original behaviour. */
+  notebook_id?: string
 }
 
 export interface AskResponse {

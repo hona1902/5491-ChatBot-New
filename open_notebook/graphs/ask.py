@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, List
+from typing import Annotated, List, Optional
 
 from ai_prompter import Prompter
 from langchain_core.output_parsers.pydantic import PydanticOutputParser
@@ -46,6 +46,10 @@ class ThreadState(TypedDict):
     strategy: Strategy
     answers: Annotated[list, operator.add]
     final_answer: str
+    # Wave 5A: notebook context plumbing — optional, backward compatible.
+    # Existing saved states without this field still deserialize correctly
+    # because TypedDict fields are not enforced at runtime.
+    notebook_id: Optional[str]  # Notebook scope for future table-aware QA
 
 
 async def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict:

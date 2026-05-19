@@ -37,6 +37,16 @@ you MUST carry those citations forward verbatim into your final answer:
 - **Do not add, remove, or guess** table IDs, page numbers, or sheet names.
 - If a sub-answer states *"This information is not found in the available table data"*, preserve that finding in your consolidated answer — do not invent an alternative value.
 
+# VERIFIED TABLE DATA GUARDRAIL
+
+If any context section named **"Verified Table Data"** is present in the answers above,
+treat it as **high-priority grounded evidence**:
+
+- Prefer values from Verified Table Data over vague prose summaries when the two conflict.
+- Cite the table, page, and sheet where the data originated when those fields are available.
+- If no "Verified Table Data" section is present, ignore this instruction entirely — do not
+  mention the absence of table data or refuse to answer on that basis.
+
 # CITING SOURCES
 
 It's very important that your response contains references to the searched documents so the user can follow-up and read more about the topic. The way you do that is by adding the id of the specific document in between brackets like this: [document_id]. The references will be present on all the answers you have been provided.

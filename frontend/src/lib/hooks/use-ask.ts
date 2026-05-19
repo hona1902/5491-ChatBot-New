@@ -36,7 +36,12 @@ export function useAsk() {
     error: null
   })
 
-  const sendAsk = useCallback(async (question: string, models: AskModels) => {
+  const sendAsk = useCallback(async (
+    question: string,
+    models: AskModels,
+    /** Wave 5A: include notebook_id in payload when asking from a notebook context. */
+    notebookId?: string,
+  ) => {
     // Validate inputs
     if (!question.trim()) {
       toast.error(t('apiErrors.pleaseEnterQuestion'))
@@ -62,7 +67,10 @@ export function useAsk() {
         question,
         strategy_model: models.strategy,
         answer_model: models.answer,
-        final_answer_model: models.finalAnswer
+        final_answer_model: models.finalAnswer,
+        // Wave 5A: pass notebook_id only when a notebook context is present.
+        // When undefined, the field is omitted from JSON serialisation (JSON.stringify skips undefined).
+        ...(notebookId ? { notebook_id: notebookId } : {}),
       })
 
       if (!response) {

@@ -51,6 +51,11 @@ class AskRequest(BaseModel):
     strategy_model: str = Field(..., description="Model ID for query strategy")
     answer_model: str = Field(..., description="Model ID for individual answers")
     final_answer_model: str = Field(..., description="Model ID for final answer")
+    # Wave 5A: optional notebook context — existing clients that omit this still work
+    notebook_id: Optional[str] = Field(
+        None,
+        description="Notebook ID to scope table-aware QA (Wave 5A plumbing; not yet used for lookup)",
+    )
 
 
 class AskResponse(BaseModel):
