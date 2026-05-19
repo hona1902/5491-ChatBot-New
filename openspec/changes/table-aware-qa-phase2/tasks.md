@@ -77,17 +77,17 @@
 
 ## 7. Backfill Script
 
-- [ ] 7.1 Create `scripts/backfill_tables.py` with CLI argument parsing (`--source-ids`, `--notebook-id`, `--force`, `--dry-run`, `--skip-embeddings`, `--concurrency N` where default N=1); when `--skip-embeddings` is passed, print a visible WARNING after the run: `WARNING: --skip-embeddings was set. Semantic row retrieval will not work for backfilled sources until embeddings are generated. Run again without --skip-embeddings to complete.`
-- [ ] 7.2 Implement idempotency check: skip sources with existing `source_table` records unless `--force`
-- [ ] 7.3 Implement `--force` path: delete existing `source_table` and table-row `source_embedding` records before re-extracting
-- [ ] 7.4 Implement structured progress output: one line per source with `OK/SKIP/ERROR`, source ID, table count, row count
-- [ ] 7.5 Implement `--dry-run`: report what would be processed without writing to DB, then exit 0
-- [ ] 7.6 Implement extraction failure handling: catch per-source exceptions, log error, continue batch, exit non-zero if any failed
-- [ ] 7.7 Verify backfill respects `OPEN_NOTEBOOK_TABLE_MAX_ROWS`, `OPEN_NOTEBOOK_TABLE_MAX_COLS`, `OPEN_NOTEBOOK_TABLES_MARKDOWN_MAX_CHARS` caps
-- [ ] 7.8 Write unit test: `--dry-run` prints plan and writes nothing to DB
-- [ ] 7.9 Write unit test: source with existing tables is skipped without `--force`; re-processed with `--force`
-- [ ] 7.10 Write unit test: one source fails extraction → error logged, other sources continue, exit code non-zero
-- [ ] 7.11 Manual test: run backfill on a notebook with 3 pre-Phase-1 sources; verify `source_table` records created and `source_embedding` table-row chunks present
+- [x] 7.1 Create `scripts/backfill_tables.py` with CLI argument parsing (`--source-ids`, `--notebook-id`, `--force`, `--dry-run`, `--skip-embeddings`, `--concurrency N` where default N=1); when `--skip-embeddings` is passed, print a visible WARNING after the run: `WARNING: --skip-embeddings was set. Semantic row retrieval will not work for backfilled sources until embeddings are generated. Run again without --skip-embeddings to complete.`
+- [x] 7.2 Implement idempotency check: skip sources with existing `source_table` records unless `--force`
+- [x] 7.3 Implement `--force` path: delete existing `source_table` and table-row `source_embedding` records before re-extracting
+- [x] 7.4 Implement structured progress output: one line per source with `OK/SKIP/ERROR`, source ID, table count, row count
+- [x] 7.5 Implement `--dry-run`: report what would be processed without writing to DB, then exit 0
+- [x] 7.6 Implement extraction failure handling: catch per-source exceptions, log error, continue batch, exit non-zero if any failed
+- [x] 7.7 Verify backfill respects `OPEN_NOTEBOOK_TABLE_MAX_ROWS`, `OPEN_NOTEBOOK_TABLE_MAX_COLS`, `OPEN_NOTEBOOK_TABLES_MARKDOWN_MAX_CHARS` caps
+- [x] 7.8 Write unit test: `--dry-run` prints plan and writes nothing to DB
+- [x] 7.9 Write unit test: source with existing tables is skipped without `--force`; re-processed with `--force`
+- [x] 7.10 Write unit test: one source fails extraction → error logged, other sources continue, exit code non-zero
+- [x] 7.11 Manual test: run backfill on a notebook with 3 pre-Phase-1 sources; verify `source_table` records created and `source_embedding` table-row chunks present
 
 ## 8. Final Integration and Regression
 
