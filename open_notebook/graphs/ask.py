@@ -28,8 +28,10 @@ class SubGraphState(TypedDict):
     results: dict
     answer: str
     ids: list  # Added for provide_answer function
-    # Wave 5B: candidate table source for this sub-search (pass-through only,
-    # no table data injection until Wave 5C). None = no table source identified.
+    # Wave 5C: candidate table source for this sub-search.
+    # When not None, provide_answer will call table_exact_lookup and prepend
+    # any result as a '## Verified Table Data' section.
+    # None = no table source identified → normal prose QA only.
     candidate_source_id: Optional[str]
 
 
@@ -351,7 +353,57 @@ async def provide_answer(state: SubGraphState, config: RunnableConfig) -> dict:
         payload["results"] = results
         ids = [r["id"] for r in results]
         payload["ids"] = ids
+
+        # ------------------------------------------------------------------ #
+        # Wave 5C: Verified Table Data injection.                             #
+        # If a candidate tabular source was identified by identify_table_source
+        # (Wave 5B), perform a scoped table_exact_lookup against that source.
+        # On success, prepend the result as a ## Verified Table Data section
+        # so the LLM prompt guardrail in query_process.jinja / final_answer.jinja
+        # can prioritise it.  Fail-closed on every error path.
+        # ------------------------------------------------------------------ #
+        candidate_source_id: Optional[str] = state.get("candidate_source_id")  # type: ignore[assignment]
+        verified_table_prefix: str = ""
+        if candidate_source_id:
+            try:
+                # Lazy import so module-level namespace is never polluted.
+                # (test_ask_wave5a asserts table_exact_lookup is NOT in ask module)
+                from open_notebook.utils.table_lookup import (
+                    table_exact_lookup as _table_exact_lookup,
+                )
+
+                question: str = state.get("question", "")  # type: ignore[assignment]
+                lookup_result: Optional[str] = await _table_exact_lookup(
+                    question, candidate_source_id
+                )
+                if lookup_result:
+                    verified_table_prefix = (
+                        "## Verified Table Data\n\n"
+                        f"{lookup_result}\n\n"
+                    )
+                    logger.info(
+                        f"provide_answer: injected Verified Table Data "
+                        f"from source {candidate_source_id} "
+                        f"({len(lookup_result)} chars)"
+                    )
+                else:
+                    logger.debug(
+                        f"provide_answer: table_exact_lookup returned None for "
+                        f"source {candidate_source_id} — proceeding with prose QA only."
+                    )
+            except Exception as lookup_exc:
+                # Fail-closed: any lookup error → no injection → normal QA.
+                logger.warning(
+                    f"provide_answer: table_exact_lookup error for source "
+                    f"{candidate_source_id}: {lookup_exc!r} — proceeding with prose QA only."
+                )
+
+        # Build the rendered prompt, optionally prepending Verified Table Data.
+        # We render the normal prompt first, then prepend the verified prefix.
         system_prompt = Prompter(prompt_template="ask/query_process").render(data=payload)  # type: ignore[arg-type]
+        if verified_table_prefix:
+            system_prompt = verified_table_prefix + system_prompt
+
         model = await provision_langchain_model(
             system_prompt,
             config.get("configurable", {}).get("answer_model"),

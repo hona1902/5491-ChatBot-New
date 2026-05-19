@@ -582,8 +582,11 @@ async def test_table_exact_lookup_not_called():
 
 @pytest.mark.asyncio
 async def test_provide_answer_does_not_inject_verified_table_data():
-    """provide_answer must NOT reference 'Verified Table Data' even when
-    candidate_source_id is present in the sub-graph state."""
+    """provide_answer Wave 5C: when table_exact_lookup returns None (no match),
+    no 'Verified Table Data' section appears in the LLM prompt or the answer.
+    This ensures the fail-through path works correctly.
+    (Wave 5B note: this test now patches table_exact_lookup to return None
+     because Wave 5C has wired the lookup into provide_answer.)"""
     from open_notebook.graphs.ask import provide_answer
 
     sub_state = {
@@ -593,7 +596,7 @@ async def test_provide_answer_does_not_inject_verified_table_data():
         "results": {},
         "answer": "",
         "ids": [],
-        "candidate_source_id": "source:some_csv",  # Wave 5B pass-through
+        "candidate_source_id": "source:some_csv",  # Wave 5C will attempt lookup
     }
 
     fake_vector_results = [
@@ -623,13 +626,19 @@ async def test_provide_answer_does_not_inject_verified_table_data():
             "open_notebook.graphs.ask.clean_thinking_content",
             side_effect=lambda x: x,
         ),
+        # Wave 5C: mock the lazily-imported table_exact_lookup to return None
+        # (no keyword/semantic match) → no injection → normal prose QA only.
+        patch(
+            "open_notebook.utils.table_lookup.table_exact_lookup",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         result = await provide_answer(sub_state, _DUMMY_CONFIG)
 
     # Result must be a normal prose answer list
     assert "answers" in result
     assert isinstance(result["answers"], list)
-    # No 'Verified Table Data' injection
+    # lookup returned None → no 'Verified Table Data' injection in answer text
     for answer in result["answers"]:
         assert "Verified Table Data" not in str(answer)
 
