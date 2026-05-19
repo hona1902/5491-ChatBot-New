@@ -140,18 +140,24 @@ class APIClient:
         strategy_model: str,
         answer_model: str,
         final_answer_model: str,
+        # Wave 5A: optional notebook context — callers that omit this continue to work
+        notebook_id: Optional[str] = None,
     ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
         """Ask the knowledge base a question (simple, non-streaming)."""
-        data = {
+        data: Dict[str, Any] = {
             "question": question,
             "strategy_model": strategy_model,
             "answer_model": answer_model,
             "final_answer_model": final_answer_model,
         }
+        # Include notebook_id only when provided so legacy callers see identical payloads
+        if notebook_id is not None:
+            data["notebook_id"] = notebook_id
         # Use configured timeout for long-running ask operations
         return self._make_request(
             "POST", "/api/search/ask/simple", json=data, timeout=self.timeout
         )
+
 
     # Models API methods
     def get_models(self, model_type: Optional[str] = None) -> List[Dict[Any, Any]]:

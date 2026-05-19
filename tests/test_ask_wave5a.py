@@ -11,7 +11,6 @@ Scope (per spec):
 - No source_chat.py changes
 """
 
-import os
 from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -347,6 +346,132 @@ class TestFrontendAskRequestType:
         assert "notebook_id" in content, (
             "use-ask.ts must include notebook_id in the API payload"
         )
+
+
+
+# ===========================================================================
+# 7. Simple endpoint: notebook_id plumbing through ask_knowledge_base_simple
+# ===========================================================================
+
+
+class TestSimpleEndpointNotebookIdPlumbing:
+    """ask_knowledge_base_simple must forward notebook_id into graph_input_simple."""
+
+    def _make_mock_model(self):
+        m = MagicMock()
+        m.id = "model:test"
+        return m
+
+    @pytest.mark.asyncio
+    async def test_simple_endpoint_passes_notebook_id(self):
+        """When AskRequest carries notebook_id, simple endpoint puts it in graph input."""
+        from api.routers.search import ask_knowledge_base_simple
+        from api.models import AskRequest
+
+        captured_input: Dict[str, Any] = {}
+
+        async def fake_astream(input, config, stream_mode):
+            captured_input.update(input)
+            # Yield a write_final_answer chunk so the endpoint can extract final_answer
+            yield {"write_final_answer": {"final_answer": "Test answer"}}
+
+        mock_graph = MagicMock()
+        mock_graph.astream = fake_astream
+
+        mock_model = self._make_mock_model()
+
+        request = AskRequest(
+            question="What are total sales?",
+            strategy_model="model:1",
+            answer_model="model:2",
+            final_answer_model="model:3",
+            notebook_id="notebook:nb42",
+        )
+
+        with (
+            patch("api.routers.search.ask_graph", mock_graph),
+            patch("api.routers.search.Model.get", AsyncMock(return_value=mock_model)),
+            patch("api.routers.search.model_manager.get_embedding_model", AsyncMock(return_value=MagicMock())),
+        ):
+            response = await ask_knowledge_base_simple(request)
+
+        assert captured_input.get("notebook_id") == "notebook:nb42", (
+            "ask_knowledge_base_simple must forward notebook_id into ask_graph input"
+        )
+        assert captured_input.get("question") == "What are total sales?"
+
+    @pytest.mark.asyncio
+    async def test_simple_endpoint_notebook_id_none(self):
+        """When notebook_id is absent from AskRequest, simple endpoint passes None."""
+        from api.routers.search import ask_knowledge_base_simple
+        from api.models import AskRequest
+
+        captured_input: Dict[str, Any] = {}
+
+        async def fake_astream(input, config, stream_mode):
+            captured_input.update(input)
+            yield {"write_final_answer": {"final_answer": "Test answer"}}
+
+        mock_graph = MagicMock()
+        mock_graph.astream = fake_astream
+        mock_model = self._make_mock_model()
+
+        request = AskRequest(
+            question="What is RAG?",
+            strategy_model="model:1",
+            answer_model="model:2",
+            final_answer_model="model:3",
+            # notebook_id deliberately omitted
+        )
+
+        with (
+            patch("api.routers.search.ask_graph", mock_graph),
+            patch("api.routers.search.Model.get", AsyncMock(return_value=mock_model)),
+            patch("api.routers.search.model_manager.get_embedding_model", AsyncMock(return_value=MagicMock())),
+        ):
+            response = await ask_knowledge_base_simple(request)
+
+        assert "question" in captured_input
+        assert captured_input.get("notebook_id") is None, (
+            "When notebook_id is absent, graph_input_simple must have notebook_id=None (not missing)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_simple_endpoint_no_longer_uses_dict_question_only(self):
+        """The simple endpoint must NOT pass a dict with only 'question' key (pre-5A pattern)."""
+        from api.routers.search import ask_knowledge_base_simple
+        from api.models import AskRequest
+
+        captured_input: Dict[str, Any] = {}
+
+        async def fake_astream(input, config, stream_mode):
+            captured_input.update(input)
+            yield {"write_final_answer": {"final_answer": "ok"}}
+
+        mock_graph = MagicMock()
+        mock_graph.astream = fake_astream
+        mock_model = self._make_mock_model()
+
+        request = AskRequest(
+            question="Is notebook_id in the payload?",
+            strategy_model="model:1",
+            answer_model="model:2",
+            final_answer_model="model:3",
+            notebook_id="notebook:check",
+        )
+
+        with (
+            patch("api.routers.search.ask_graph", mock_graph),
+            patch("api.routers.search.Model.get", AsyncMock(return_value=mock_model)),
+            patch("api.routers.search.model_manager.get_embedding_model", AsyncMock(return_value=MagicMock())),
+        ):
+            await ask_knowledge_base_simple(request)
+
+        # The pre-5A input had only one key; post-5A must have at least two
+        assert len(captured_input) >= 2, (
+            "Graph input must contain both 'question' and 'notebook_id' (not the pre-5A single-key dict)"
+        )
+        assert "notebook_id" in captured_input
 
 
 if __name__ == "__main__":
