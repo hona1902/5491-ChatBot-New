@@ -213,35 +213,44 @@ class TestSearchRouterNotebookIdPlumbing:
 
 
 class TestNoTableLookupInWave5A:
-    """Wave 5A must NOT call table_exact_lookup or identify_table_source."""
+    """Wave 5A must NOT call table_exact_lookup.
+
+    Wave 5B note: identify_table_source IS now implemented (that is the Wave 5B
+    deliverable). Only table_exact_lookup / Verified Table Data injection are
+    still prohibited until Wave 5C.
+    """
 
     def test_table_exact_lookup_not_imported_in_ask_graph(self):
         """ask.py must not import table_exact_lookup at module level."""
         import open_notebook.graphs.ask as ask_module
 
         assert not hasattr(ask_module, "table_exact_lookup"), (
-            "table_exact_lookup must NOT be imported in ask.py during Wave 5A"
+            "table_exact_lookup must NOT be imported in ask.py — still forbidden until Wave 5C"
         )
 
-    def test_identify_table_source_not_in_ask_graph(self):
-        """identify_table_source node must not be defined in ask.py during Wave 5A."""
+    def test_identify_table_source_now_exists_in_wave5b(self):
+        """Wave 5B has implemented identify_table_source — confirm it is present."""
         import open_notebook.graphs.ask as ask_module
 
-        assert not hasattr(ask_module, "identify_table_source"), (
-            "identify_table_source must NOT be implemented in Wave 5A"
+        assert hasattr(ask_module, "identify_table_source"), (
+            "identify_table_source MUST be implemented by Wave 5B"
         )
 
-    def test_graph_nodes_unchanged(self):
-        """The ask graph must have the same three nodes as before Wave 5A."""
+    def test_graph_has_identify_table_source_node_but_no_injection_nodes(self):
+        """The ask graph must contain identify_table_source (Wave 5B) but must NOT
+        contain any data-injection or lookup-call nodes (Wave 5C concern)."""
         from open_notebook.graphs.ask import graph
 
-        # LangGraph exposes nodes via the underlying StateGraph.nodes dict
         node_names = set(graph.nodes.keys())
-        expected = {"agent", "provide_answer", "write_final_answer", "__start__", "__end__"}
-        # Allow for langgraph internal reserved names — but no new table nodes
-        table_nodes = {n for n in node_names if "table" in n.lower()}
-        assert not table_nodes, (
-            f"No table-related nodes should exist in Wave 5A graph; found: {table_nodes}"
+        # Wave 5B wires in identify_table_source — this must be present
+        assert "identify_table_source" in node_names, (
+            "identify_table_source node must be wired into the ask graph by Wave 5B"
+        )
+        # Still forbidden until Wave 5C
+        forbidden_nodes = {n for n in node_names
+                          if "lookup" in n.lower() or "inject" in n.lower()}
+        assert not forbidden_nodes, (
+            f"No lookup/inject nodes must exist until Wave 5C; found: {forbidden_nodes}"
         )
 
 
