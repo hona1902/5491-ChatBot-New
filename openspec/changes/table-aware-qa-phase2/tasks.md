@@ -49,15 +49,15 @@
 
 ## 5. ask.py Table-Aware Strategy
 
-- [ ] 5.1 Add `candidate_source_id: Optional[str]` field to `SubGraphState` (or equivalent state object) in `open_notebook/graphs/ask.py`
-- [ ] 5.2 Implement `identify_table_source` graph node: query notebook sources, filter to CSV/XLSX with `source_table` records, apply single-source fast path or embedding-ranked disambiguation
-- [ ] 5.3 Wire `identify_table_source` into ask.py graph before the retrieval step
+- [x] 5.1 Add `candidate_source_id: Optional[str]` field to `SubGraphState` (or equivalent state object) in `open_notebook/graphs/ask.py`
+- [x] 5.2 Implement `identify_table_source` graph node: query notebook sources, filter to CSV/XLSX with `source_table` records, apply single-source fast path or embedding-ranked disambiguation
+- [x] 5.3 Wire `identify_table_source` into ask.py graph before the retrieval step
 - [ ] 5.4 Implement scoped `table_exact_lookup` call in ask.py using `candidate_source_id` (only when not None); prepend result as `## Verified Table Data` section
-- [ ] 5.5 Implement `ASK_TABLE_SOURCE_THRESHOLD` clamping and configurable threshold logic
-- [ ] 5.6 Write unit test: notebook with no CSV/XLSX → `candidate_source_id = None`, no embedding call, lookup skipped
-- [ ] 5.7 Write unit test: notebook with one CSV source → `candidate_source_id` set without embedding
-- [ ] 5.8 Write unit test: notebook with multiple CSV sources, query matches source 2 → source 2 selected
-- [ ] 5.9 Write unit test: multiple sources, all scores below threshold → `candidate_source_id = None`
+- [x] 5.5 Implement `ASK_TABLE_SOURCE_THRESHOLD` clamping and configurable threshold logic
+- [x] 5.6 Write unit test: notebook with no CSV/XLSX → `candidate_source_id = None`, no embedding call, lookup skipped
+- [x] 5.7 Write unit test: notebook with one CSV source → `candidate_source_id` set without embedding
+- [x] 5.8 Write unit test: notebook with multiple CSV sources, query matches source 2 → source 2 selected
+- [x] 5.9 Write unit test: multiple sources, all scores below threshold → `candidate_source_id = None`
 - [ ] 5.10 Write integration test: end-to-end ask.py with a CSV source, exact-match query → answer grounded in table data
 
 ## 6. Frontend TablesPanel Component (React / Next.js)
