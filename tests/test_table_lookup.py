@@ -7,7 +7,7 @@ Coverage (Phase 1C — keyword lookup):
   - Exact match returns correct GFM Markdown table
   - No match returns None
   - Case-insensitive matching works
-  - Non-CSV/XLSX source returns None immediately (no row scan)
+  - Source with no source_table records returns None (any file type)
   - Source with no source_table records returns None
   - Empty query returns None
   - Partial token match (substring) also matches
@@ -19,7 +19,7 @@ Coverage (Phase 2 — semantic fallback, §3):
   - Keyword hit → Phase 2 is never called (no embedding generated)
   - Semantic hit for synonym/conceptual query → row returned
   - Both Phase 1 and Phase 2 miss → None returned
-  - Non-CSV source → embedding generation never called
+  - Source with no tables → returns None before embedding (any file type)
   - Embedding/model error → None returned safely
   - Score below threshold → None returned
   - Top-N cap: returns at most 10 rows
@@ -168,8 +168,8 @@ async def test_case_insensitive_matching():
 
 
 @pytest.mark.asyncio
-async def test_non_csv_source_returns_none_immediately():
-    """PDF sources are skipped without scanning any rows or calling embeddings."""
+async def test_non_csv_source_returns_none_when_no_tables():
+    """Evidence v2: PDF source with no source_table records returns None (tables checked, not extension)."""
     source = _make_source(file_path="/data/report.pdf")
 
     with (
@@ -190,15 +190,15 @@ async def test_non_csv_source_returns_none_immediately():
 
         result = await table_exact_lookup("Alice's score", "source:abc123")
 
-    # Must return None and must NOT have called get_for_source or semantic fallback
+    # Evidence v2: source_table records are checked (extension guard removed)
     assert result is None
-    mock_get_tables.assert_not_called()
+    mock_get_tables.assert_called_once()
     mock_semantic.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_docx_source_returns_none_immediately():
-    """DOCX sources (not CSV/XLSX) are also skipped immediately — no embedding call."""
+async def test_docx_source_returns_none_when_no_tables():
+    """Evidence v2: DOCX source with no source_table records returns None (tables checked, not extension)."""
     source = _make_source(file_path="/data/document.docx")
 
     with (
@@ -220,7 +220,7 @@ async def test_docx_source_returns_none_immediately():
         result = await table_exact_lookup("Alice", "source:abc123")
 
     assert result is None
-    mock_get_tables.assert_not_called()
+    mock_get_tables.assert_called_once()
     mock_semantic.assert_not_called()
 
 
@@ -553,11 +553,10 @@ async def test_both_phases_miss_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_non_csv_source_does_not_call_embedding():
-    """Task 3.6: Non-CSV/XLSX sources return None immediately, no embedding call made."""
+async def test_non_csv_source_with_no_tables_skips_embedding():
+    """Evidence v2: Source with no source_table records returns None before any embedding call."""
     source = _make_source(file_path="/data/report.pdf")
 
-    # We'll assert generate_embedding is never imported/called.
     with (
         patch(
             "open_notebook.utils.table_lookup.Source.get",
@@ -578,7 +577,8 @@ async def test_non_csv_source_does_not_call_embedding():
         result = await table_exact_lookup("some query about data", "source:abc123")
 
     assert result is None
-    mock_get_tables.assert_not_called()
+    # source_table records are now checked (extension guard removed)
+    mock_get_tables.assert_called_once()
     mock_semantic.assert_not_called()
 
 

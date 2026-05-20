@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 
 import numpy as np
 from ai_prompter import Prompter
@@ -33,6 +33,10 @@ class SubGraphState(TypedDict):
     # any result as a '## Verified Table Data' section.
     # None = no table source identified → normal prose QA only.
     candidate_source_id: Optional[str]
+    # Evidence v2: evidence need tier for conditional full-content fetch.
+    evidence_need: Optional[str]
+    # Evidence v2: notebook_id for scoping full-content queries.
+    notebook_id: Optional[str]
 
 
 class Search(BaseModel):
@@ -42,11 +46,42 @@ class Search(BaseModel):
     )
 
 
+# Evidence need tiers for notebook QA evidence routing.
+# - overview: insight summaries are sufficient
+# - factual: full source content and/or table data required
+# - legal_comparison: full content required with clause/page/table citations
+EvidenceNeed = Literal["overview", "factual", "legal_comparison"]
+
+
 class Strategy(BaseModel):
     reasoning: str
     searches: List[Search] = Field(
         default_factory=list,
         description="You can add up to five searches to this strategy",
+    )
+    evidence_need: EvidenceNeed = Field(
+        default="overview",
+        description=(
+            "Classify the question's evidence requirement: "
+            "'overview' for summary questions, "
+            "'factual' for table/number/specific-value questions, "
+            "'legal_comparison' for amendment/clause/change-comparison questions"
+        ),
+    )
+
+
+# Evidence v2: metadata model exposed in the API response.
+class EvidenceMetadata(BaseModel):
+    """Metadata about the evidence routing path taken for this Q&A cycle."""
+    evidence_need: EvidenceNeed = "overview"
+    evidence_layers_used: List[str] = Field(
+        default_factory=list,
+        description="List of evidence layers that contributed: "
+        "'verified_table_data', 'full_source_evidence', 'vector_search'",
+    )
+    fallback_occurred: bool = Field(
+        default=False,
+        description="True if a heuristic or tier upgrade changed the evidence path",
     )
 
 
@@ -60,8 +95,53 @@ class ThreadState(TypedDict):
     # because TypedDict fields are not enforced at runtime.
     notebook_id: Optional[str]  # Notebook scope for future table-aware QA
     # Wave 5B: set by identify_table_source; None = no table source found.
-    # Not yet used for lookup injection (Wave 5C concern).
     candidate_source_id: Optional[str]
+    # Evidence v2: classified evidence need for the question.
+    # Flows from Strategy model → ThreadState → downstream nodes.
+    # Defaults to "overview" when absent (backward compatible).
+    evidence_need: Optional[EvidenceNeed]
+    # Evidence v2: metadata about evidence routing (populated by write_final_answer).
+    evidence_metadata: Optional[dict]
+
+# ---------------------------------------------------------------------------
+# Evidence v2: heuristic keyword fallback for evidence classification.
+# If the LLM returns evidence_need = "overview" but the question contains
+# high-precision signal words, upgrade to "factual".  Never downgrades.
+# ---------------------------------------------------------------------------
+_EVIDENCE_SIGNAL_KEYWORDS: frozenset[str] = frozenset({
+    # English — domain-specific terms only.
+    # Avoid overly common words (article, section, paragraph, rate, schedule)
+    # that would false-positive on general/summary questions.
+    "table", "column", "row", "cell", "clause", "amendment", "amend",
+    "compare", "comparison", "appendix", "annex",
+    "fee schedule", "interest rate",
+    # Vietnamese — these are domain-specific in banking/legal context
+    "bảng", "cột", "hàng", "ô", "điều khoản",
+    "sửa đổi", "bổ sung", "so sánh", "phụ lục", "biểu", "lãi suất",
+    "phí",
+})
+
+
+def _heuristic_evidence_upgrade(
+    evidence_need: EvidenceNeed, question: str
+) -> EvidenceNeed:
+    """Upgrade evidence_need from 'overview' to 'factual' if signal keywords found.
+
+    Never downgrades: if the LLM already set 'factual' or 'legal_comparison',
+    the heuristic does not override.
+    """
+    if evidence_need != "overview":
+        return evidence_need
+
+    q_lower = question.lower()
+    for keyword in _EVIDENCE_SIGNAL_KEYWORDS:
+        if keyword in q_lower:
+            logger.debug(
+                f"heuristic_evidence_upgrade: keyword '{keyword}' found — "
+                f"upgrading overview → factual"
+            )
+            return "factual"
+    return "overview"
 
 
 async def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict:
@@ -88,7 +168,19 @@ async def call_model_with_messages(state: ThreadState, config: RunnableConfig) -
         # Parse the cleaned JSON content
         strategy = parser.parse(cleaned_content)
 
-        return {"strategy": strategy}
+        # Evidence v2: extract evidence_need from strategy and apply heuristic.
+        raw_need: EvidenceNeed = strategy.evidence_need
+        question: str = state.get("question", "")  # type: ignore[assignment]
+        final_need = _heuristic_evidence_upgrade(raw_need, question)
+
+        if final_need != raw_need:
+            logger.info(
+                f"evidence_need upgraded from '{raw_need}' to '{final_need}' "
+                f"by heuristic fallback"
+            )
+
+        return {"strategy": strategy, "evidence_need": final_need}
+
     except OpenNotebookError:
         raise
     except Exception as e:
@@ -97,30 +189,25 @@ async def call_model_with_messages(state: ThreadState, config: RunnableConfig) -
 
 
 # ---------------------------------------------------------------------------
-# Wave 5B: identify_table_source
+# Evidence v2: identify_table_source (expanded from Wave 5B)
 # ---------------------------------------------------------------------------
-# File extensions treated as structured tabular sources eligible for lookup.
-_TABULAR_EXTENSIONS: frozenset[str] = frozenset({".csv", ".xlsx"})
-
-
-def _source_is_tabular(file_path: Optional[str]) -> bool:
-    """Return True if file_path ends with .csv or .xlsx (case-insensitive)."""
-    if not file_path:
-        return False
-    dot = file_path.rfind(".")
-    if dot == -1:
-        return False
-    return file_path[dot:].lower() in _TABULAR_EXTENSIONS
+# Previously restricted to CSV/XLSX via _source_is_tabular filter.
+# Now eligible for ANY source type that has source_table records
+# (including DOCX and PDF with extracted tables).
 
 
 async def identify_table_source(state: ThreadState, config: RunnableConfig) -> dict:
     """
-    Wave 5B node: identify the single most relevant CSV/XLSX source in the
-    notebook for use as a candidate table source.
+    Identify the single most relevant source in the notebook that has
+    structured table data (source_table records) for use as a candidate.
+
+    Evidence v2 change: eligibility is no longer limited to CSV/XLSX.
+    Any source type (CSV, XLSX, DOCX, PDF) with source_table records
+    is now eligible for table lookup.
 
     Rules (fail-closed throughout):
     1. notebook_id missing  → candidate_source_id = None.
-    2. Zero CSV/XLSX sources with source_table records → None.
+    2. Zero sources with source_table records → None.
     3. Exactly one candidate    → selected directly (no embedding call).
     4. Multiple candidates      → embed question once, pick best by cosine
                                    similarity to source metadata (title/topics);
@@ -138,14 +225,9 @@ async def identify_table_source(state: ThreadState, config: RunnableConfig) -> d
     try:
         # ------------------------------------------------------------------ #
         # 1. Query sources linked to this notebook via reference edges.       #
-        #    Keep only CSV/XLSX sources that have at least one source_table.  #
         # ------------------------------------------------------------------ #
         nb_rid = ensure_record_id(notebook_id)
 
-        # Simple two-step approach: fetch sources linked to notebook via
-        # reference edges, then filter/count in Python.  A single complex
-        # SurrealQL query would be faster but harder to test portably across
-        # SurrealDB versions; simplicity wins here.
         nb_sources_raw = await repo_query(
             """
             SELECT in AS source FROM reference WHERE out = $nb_id FETCH source
@@ -161,24 +243,23 @@ async def identify_table_source(state: ThreadState, config: RunnableConfig) -> d
 
     try:
         # ------------------------------------------------------------------ #
-        # 2. Filter: only CSV/XLSX sources.                                   #
+        # 2. Collect ALL sources (no file-type filter).                       #
         # ------------------------------------------------------------------ #
-        tabular_candidates: list[dict] = []
+        all_sources: list[dict] = []
 
         for row in nb_sources_raw or []:
             src = row.get("source") or {}
             if not isinstance(src, dict):
-                continue
-            asset = src.get("asset") or {}
-            file_path = asset.get("file_path", "") if isinstance(asset, dict) else ""
-            if not _source_is_tabular(file_path):
                 continue
 
             source_id = src.get("id") or ""
             if not source_id:
                 continue
 
-            tabular_candidates.append(
+            asset = src.get("asset") or {}
+            file_path = asset.get("file_path", "") if isinstance(asset, dict) else ""
+
+            all_sources.append(
                 {
                     "source_id": str(source_id),
                     "title": src.get("title") or "",
@@ -187,17 +268,18 @@ async def identify_table_source(state: ThreadState, config: RunnableConfig) -> d
                 }
             )
 
-        if not tabular_candidates:
+        if not all_sources:
             logger.debug(
-                f"identify_table_source: no CSV/XLSX sources in notebook {notebook_id}."
+                f"identify_table_source: no sources in notebook {notebook_id}."
             )
             return {"candidate_source_id": None}
 
         # ------------------------------------------------------------------ #
         # 3. Keep only sources that have at least one source_table record.    #
+        #    This is the ONLY filter — any source type is eligible.           #
         # ------------------------------------------------------------------ #
         candidates_with_tables: list[dict] = []
-        for cand in tabular_candidates:
+        for cand in all_sources:
             try:
                 count_result = await repo_query(
                     "SELECT count() AS cnt FROM source_table "
@@ -217,10 +299,11 @@ async def identify_table_source(state: ThreadState, config: RunnableConfig) -> d
 
         if not candidates_with_tables:
             logger.debug(
-                f"identify_table_source: no tabular sources with source_table "
+                f"identify_table_source: no sources with source_table "
                 f"records in notebook {notebook_id}."
             )
             return {"candidate_source_id": None}
+
 
         # ------------------------------------------------------------------ #
         # 4a. Fast path: exactly one candidate.                               #
@@ -325,6 +408,8 @@ async def identify_table_source(state: ThreadState, config: RunnableConfig) -> d
 
 async def trigger_queries(state: ThreadState, config: RunnableConfig):
     candidate_source_id: Optional[str] = state.get("candidate_source_id")  # type: ignore[assignment]
+    evidence_need: Optional[str] = state.get("evidence_need")  # type: ignore[assignment]
+    notebook_id: Optional[str] = state.get("notebook_id")  # type: ignore[assignment]
     return [
         Send(
             "provide_answer",
@@ -332,13 +417,94 @@ async def trigger_queries(state: ThreadState, config: RunnableConfig):
                 "question": state["question"],
                 "instructions": s.instructions,
                 "term": s.term,
-                # Wave 5B: pass candidate through to sub-graph state.
-                # No injection yet — Wave 5C will use it for table lookup.
                 "candidate_source_id": candidate_source_id,
+                # Evidence v2: pass evidence tier and notebook scope.
+                "evidence_need": evidence_need,
+                "notebook_id": notebook_id,
             },
         )
         for s in state["strategy"].searches
     ]
+
+# ---------------------------------------------------------------------------
+# Evidence v2: fetch_full_content helper
+# ---------------------------------------------------------------------------
+
+
+async def fetch_full_content(
+    notebook_id: Optional[str],
+    max_chars: Optional[int] = None,
+) -> Optional[str]:
+    """Fetch full_text for sources linked to *notebook_id*, up to *max_chars*.
+
+    Returns a formatted string with source titles and content, or ``None``
+    on error / empty results.  Truncation respects paragraph boundaries
+    and appends a ``[TRUNCATED]`` marker.
+
+    This is only called when ``evidence_need in {'factual', 'legal_comparison'}``
+    — never for ``overview`` questions.
+    """
+    if not notebook_id:
+        return None
+
+    if max_chars is None:
+        from open_notebook.config import EVIDENCE_FULL_TEXT_MAX_CHARS
+        max_chars = EVIDENCE_FULL_TEXT_MAX_CHARS
+
+    try:
+        nb_rid = ensure_record_id(notebook_id)
+        sources_raw = await repo_query(
+            """
+            SELECT in AS source FROM reference
+            WHERE out = $nb_id FETCH source
+            """,
+            {"nb_id": nb_rid},
+        )
+    except Exception as exc:
+        logger.warning(
+            f"fetch_full_content: DB error querying sources for "
+            f"notebook {notebook_id}: {exc}"
+        )
+        return None
+
+    if not sources_raw:
+        return None
+
+    parts: list[str] = []
+    total_chars = 0
+
+    for row in sources_raw:
+        src = row.get("source") or {}
+        if not isinstance(src, dict):
+            continue
+
+        full_text = src.get("full_text") or ""
+        if not full_text:
+            continue
+
+        title = src.get("title") or "Untitled Source"
+        remaining = max_chars - total_chars
+        if remaining <= 0:
+            break
+
+        if len(full_text) > remaining:
+            # Truncate at the last paragraph boundary before the limit.
+            truncated = full_text[:remaining]
+            last_para = truncated.rfind("\n\n")
+            if last_para > 0:
+                truncated = truncated[:last_para]
+            truncated += "\n\n[TRUNCATED — content exceeds character limit]"
+            parts.append(f"### {title}\n\n{truncated}")
+            total_chars += len(truncated)
+            break
+        else:
+            parts.append(f"### {title}\n\n{full_text}")
+            total_chars += len(full_text)
+
+    if not parts:
+        return None
+
+    return "\n\n---\n\n".join(parts)
 
 
 async def provide_answer(state: SubGraphState, config: RunnableConfig) -> dict:
@@ -398,9 +564,40 @@ async def provide_answer(state: SubGraphState, config: RunnableConfig) -> dict:
                     f"{candidate_source_id}: {lookup_exc!r} — proceeding with prose QA only."
                 )
 
-        # Build the rendered prompt, optionally prepending Verified Table Data.
-        # We render the normal prompt first, then prepend the verified prefix.
+        # ------------------------------------------------------------------ #
+        # Evidence v2: Full Source Evidence injection.                         #
+        # When evidence_need is 'factual' or 'legal_comparison', fetch the    #
+        # full_text from relevant sources and inject as                        #
+        # '## Full Source Evidence'.  Skipped for 'overview' (no extra DB     #
+        # query).  Fail-closed on errors.                                     #
+        # ------------------------------------------------------------------ #
+        evidence_need: str = state.get("evidence_need") or "overview"  # type: ignore[assignment]
+        full_source_prefix: str = ""
+        if evidence_need in ("factual", "legal_comparison"):
+            nb_id: Optional[str] = state.get("notebook_id")  # type: ignore[assignment]
+            try:
+                full_content = await fetch_full_content(nb_id)
+                if full_content:
+                    full_source_prefix = (
+                        "## Full Source Evidence\n\n"
+                        f"{full_content}\n\n"
+                    )
+                    logger.info(
+                        f"provide_answer: injected Full Source Evidence "
+                        f"({len(full_content)} chars) for evidence_need={evidence_need}"
+                    )
+            except Exception as fc_exc:
+                # Fail-closed: error → no injection → normal QA.
+                logger.warning(
+                    f"provide_answer: fetch_full_content error: {fc_exc!r} "
+                    f"— proceeding without full source evidence."
+                )
+
+        # Build the rendered prompt, optionally prepending evidence sections.
+        # Priority: Verified Table Data > Full Source Evidence > normal context.
         system_prompt = Prompter(prompt_template="ask/query_process").render(data=payload)  # type: ignore[arg-type]
+        if full_source_prefix:
+            system_prompt = full_source_prefix + system_prompt
         if verified_table_prefix:
             system_prompt = verified_table_prefix + system_prompt
 
@@ -431,7 +628,36 @@ async def write_final_answer(state: ThreadState, config: RunnableConfig) -> dict
         )
         ai_message = await model.ainvoke(system_prompt)
         final_content = extract_text_content(ai_message.content)
-        return {"final_answer": clean_thinking_content(final_content)}
+
+        # Evidence v2: build evidence metadata for the API response.
+        evidence_need_val: str = state.get("evidence_need") or "overview"  # type: ignore[assignment]
+        layers: list[str] = ["vector_search"]  # always present
+        fallback = False
+
+        # Check if verified table data was used (answers contain the marker)
+        answers_text = str(state.get("answers", []))
+        if "Verified Table Data" in answers_text:
+            layers.insert(0, "verified_table_data")
+        if "Full Source Evidence" in answers_text:
+            layers.insert(len(layers) - 1 if layers else 0, "full_source_evidence")
+
+        # Detect if heuristic upgrade occurred (strategy said overview but
+        # evidence_need was upgraded).
+        strategy = state.get("strategy")
+        if strategy and hasattr(strategy, "evidence_need"):
+            if strategy.evidence_need != evidence_need_val:  # type: ignore[union-attr]
+                fallback = True
+
+        evidence_meta = EvidenceMetadata(
+            evidence_need=evidence_need_val,  # type: ignore[arg-type]
+            evidence_layers_used=layers,
+            fallback_occurred=fallback,
+        )
+
+        return {
+            "final_answer": clean_thinking_content(final_content),
+            "evidence_metadata": evidence_meta.model_dump(),
+        }
     except OpenNotebookError:
         raise
     except Exception as e:

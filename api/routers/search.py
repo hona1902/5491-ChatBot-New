@@ -65,6 +65,7 @@ async def stream_ask_response(
     """Stream the ask response as Server-Sent Events."""
     try:
         final_answer = None
+        evidence_metadata = None
 
         # Wave 5A: include notebook_id in graph state when present.
         # When None the initial state is equivalent to the previous dict(question=question).
@@ -99,11 +100,19 @@ async def stream_ask_response(
 
             elif "write_final_answer" in chunk:
                 final_answer = chunk["write_final_answer"]["final_answer"]
-                final_data = {"type": "final_answer", "content": final_answer}
+                evidence_metadata = chunk["write_final_answer"].get("evidence_metadata")
+                final_data = {
+                    "type": "final_answer",
+                    "content": final_answer,
+                }
+                if evidence_metadata:
+                    final_data["evidence_metadata"] = evidence_metadata
                 yield f"data: {json.dumps(final_data)}\n\n"
 
         # Send completion signal
         completion_data = {"type": "complete", "final_answer": final_answer}
+        if evidence_metadata:
+            completion_data["evidence_metadata"] = evidence_metadata
         yield f"data: {json.dumps(completion_data)}\n\n"
 
     except Exception as e:
@@ -200,6 +209,7 @@ async def ask_knowledge_base_simple(ask_request: AskRequest):
 
         # Run the ask graph and get final result
         final_answer = None
+        evidence_metadata = None
         # Wave 5A: include notebook_id in graph state when present.
         graph_input_simple: dict = {
             "question": ask_request.question,
@@ -218,11 +228,16 @@ async def ask_knowledge_base_simple(ask_request: AskRequest):
         ):
             if "write_final_answer" in chunk:
                 final_answer = chunk["write_final_answer"]["final_answer"]
+                evidence_metadata = chunk["write_final_answer"].get("evidence_metadata")
 
         if not final_answer:
             raise HTTPException(status_code=500, detail="No answer generated")
 
-        return AskResponse(answer=final_answer, question=ask_request.question)
+        return AskResponse(
+            answer=final_answer,
+            question=ask_request.question,
+            evidence_metadata=evidence_metadata,
+        )
 
     except HTTPException:
         raise

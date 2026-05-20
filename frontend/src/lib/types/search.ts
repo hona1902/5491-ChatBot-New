@@ -42,6 +42,12 @@ export interface AskRequest {
 export interface AskResponse {
   answer: string
   question: string
+  // Evidence v2: optional metadata about the evidence routing path
+  evidence_metadata?: {
+    evidence_need: 'overview' | 'factual' | 'legal_comparison'
+    evidence_layers_used: string[]
+    fallback_occurred: boolean
+  }
 }
 
 // SSE Streaming types
@@ -60,4 +66,10 @@ export interface AskStreamEvent {
   content?: string
   final_answer?: string
   message?: string
+  // Evidence v2: metadata from evidence routing
+  evidence_metadata?: {
+    evidence_need: 'overview' | 'factual' | 'legal_comparison'
+    evidence_layers_used: string[]
+    fallback_occurred: boolean
+  }
 }

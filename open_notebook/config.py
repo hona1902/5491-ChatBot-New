@@ -46,3 +46,12 @@ TABLE_LOOKUP_SIMILARITY_THRESHOLD: float = float(
 ASK_TABLE_SOURCE_THRESHOLD: float = float(
     os.environ.get("ASK_TABLE_SOURCE_THRESHOLD", "0.35")
 )
+
+# ── Evidence v2: Full-Content Routing Controls ────────────────────────────
+# Maximum number of characters for the full source text injected when
+# evidence_need is 'factual' or 'legal_comparison'.
+# Default 20 000 (~20 KB).  Content is truncated at the last paragraph
+# boundary before this limit; a truncation marker is appended.
+EVIDENCE_FULL_TEXT_MAX_CHARS: int = int(
+    os.environ.get("EVIDENCE_FULL_TEXT_MAX_CHARS", "20000")
+)

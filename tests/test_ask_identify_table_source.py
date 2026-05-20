@@ -112,7 +112,7 @@ async def test_empty_notebook_id_returns_none():
 
 @pytest.mark.asyncio
 async def test_notebook_with_zero_tabular_sources_returns_none():
-    """Notebook with only PDF/DOCX sources → no candidates → None."""
+    """Notebook with sources but none have source_table records → None."""
     state = _make_state(notebook_id="notebook:abc")
 
     pdf_row = _make_source_row("source:pdf1", file_path="/data/report.pdf")
@@ -125,7 +125,13 @@ async def test_notebook_with_zero_tabular_sources_returns_none():
         ),
         patch(
             "open_notebook.graphs.ask.repo_query",
-            new=AsyncMock(return_value=[pdf_row, docx_row]),
+            new=AsyncMock(
+                side_effect=[
+                    [pdf_row, docx_row],  # notebook sources
+                    [],                    # pdf: no source_table records
+                    [],                    # docx: no source_table records
+                ]
+            ),
         ),
     ):
         from open_notebook.graphs.ask import identify_table_source
@@ -696,3 +702,173 @@ async def test_normal_prose_ask_unchanged_when_no_candidate():
     assert "answers" in result
     assert len(result["answers"]) == 1
     assert "climate" in result["answers"][0].lower()
+
+
+# ---------------------------------------------------------------------------
+# Evidence v2: Expanded table eligibility (DOCX, PDF)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_docx_source_with_tables_is_eligible():
+    """Evidence v2: DOCX source with source_table records is now eligible."""
+    state = _make_state(notebook_id="notebook:ev2")
+
+    docx_row = _make_source_row(
+        "source:docx1", file_path="/data/contract.docx", title="Contract"
+    )
+
+    with (
+        patch(
+            "open_notebook.graphs.ask.ensure_record_id",
+            side_effect=lambda x: x,
+        ),
+        patch(
+            "open_notebook.graphs.ask.repo_query",
+            new=AsyncMock(
+                side_effect=[
+                    [docx_row],                      # notebook sources
+                    [{"cnt": 2}],                    # source_table count = 2
+                ]
+            ),
+        ),
+        patch(
+            "open_notebook.utils.embedding.generate_embedding",
+            new=AsyncMock(),
+        ) as mock_embed,
+    ):
+        from open_notebook.graphs.ask import identify_table_source
+
+        result = await identify_table_source(state, _DUMMY_CONFIG)
+
+    assert result == {"candidate_source_id": "source:docx1"}
+    mock_embed.assert_not_called()  # single candidate fast path
+
+
+@pytest.mark.asyncio
+async def test_pdf_source_with_tables_is_eligible():
+    """Evidence v2: PDF source with source_table records is now eligible."""
+    state = _make_state(notebook_id="notebook:ev2_pdf")
+
+    pdf_row = _make_source_row(
+        "source:pdf1", file_path="/data/report.pdf", title="Quarterly Report"
+    )
+
+    with (
+        patch(
+            "open_notebook.graphs.ask.ensure_record_id",
+            side_effect=lambda x: x,
+        ),
+        patch(
+            "open_notebook.graphs.ask.repo_query",
+            new=AsyncMock(
+                side_effect=[
+                    [pdf_row],
+                    [{"cnt": 4}],
+                ]
+            ),
+        ),
+        patch(
+            "open_notebook.utils.embedding.generate_embedding",
+            new=AsyncMock(),
+        ) as mock_embed,
+    ):
+        from open_notebook.graphs.ask import identify_table_source
+
+        result = await identify_table_source(state, _DUMMY_CONFIG)
+
+    assert result == {"candidate_source_id": "source:pdf1"}
+    mock_embed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_source_without_tables_skipped_regardless_of_type():
+    """Evidence v2: any source without source_table records is skipped."""
+    state = _make_state(notebook_id="notebook:ev2_skip")
+
+    csv_row = _make_source_row(
+        "source:csv1", file_path="/data/data.csv", title="Data"
+    )
+
+    with (
+        patch(
+            "open_notebook.graphs.ask.ensure_record_id",
+            side_effect=lambda x: x,
+        ),
+        patch(
+            "open_notebook.graphs.ask.repo_query",
+            new=AsyncMock(
+                side_effect=[
+                    [csv_row],
+                    [],  # no source_table records
+                ]
+            ),
+        ),
+    ):
+        from open_notebook.graphs.ask import identify_table_source
+
+        result = await identify_table_source(state, _DUMMY_CONFIG)
+
+    assert result == {"candidate_source_id": None}
+
+
+@pytest.mark.asyncio
+async def test_mixed_source_types_with_tables_embedding_disambiguates():
+    """Evidence v2: CSV + DOCX + PDF all with tables → embedding selects best."""
+    state = _make_state(
+        question="What are the contract fees?", notebook_id="notebook:ev2_mix"
+    )
+
+    csv_row = _make_source_row(
+        "source:csv1", file_path="/data/fees.csv", title="Fee Schedule"
+    )
+    docx_row = _make_source_row(
+        "source:docx1", file_path="/data/contract.docx", title="Contract Agreement"
+    )
+    pdf_row = _make_source_row(
+        "source:pdf1", file_path="/data/report.pdf", title="Annual Report"
+    )
+
+    # contract fees question → highest similarity to "Fee Schedule"
+    question_emb = [1.0, 0.0, 0.0]
+    csv_emb = [0.95, 0.1, 0.0]    # high match
+    docx_emb = [0.3, 0.8, 0.0]    # moderate match
+    pdf_emb = [0.1, 0.1, 0.9]     # low match
+
+    embed_sequence = [question_emb, csv_emb, docx_emb, pdf_emb]
+    embed_iter = iter(embed_sequence)
+
+    async def _fake_embed(text, **kw):
+        return next(embed_iter)
+
+    with (
+        patch(
+            "open_notebook.graphs.ask.ensure_record_id",
+            side_effect=lambda x: x,
+        ),
+        patch(
+            "open_notebook.graphs.ask.repo_query",
+            new=AsyncMock(
+                side_effect=[
+                    [csv_row, docx_row, pdf_row],
+                    [{"cnt": 3}],   # csv has tables
+                    [{"cnt": 1}],   # docx has tables
+                    [{"cnt": 2}],   # pdf has tables
+                ]
+            ),
+        ),
+        patch(
+            "open_notebook.utils.embedding.generate_embedding",
+            new=AsyncMock(side_effect=_fake_embed),
+        ),
+        patch(
+            "open_notebook.graphs.ask.ASK_TABLE_SOURCE_THRESHOLD",
+            0.35,
+        ),
+    ):
+        from open_notebook.graphs.ask import identify_table_source
+
+        result = await identify_table_source(state, _DUMMY_CONFIG)
+
+    assert result == {"candidate_source_id": "source:csv1"}
+

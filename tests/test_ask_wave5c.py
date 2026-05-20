@@ -168,8 +168,10 @@ class TestNoInjectionWhenLookupReturnsNone:
         ):
             result = await provide_answer(sub_state, _DUMMY_CONFIG)
 
-        # No injection
-        assert all("## Verified Table Data" not in p for p in captured_prompts)
+        # No injection at the start of the prompt (template may reference the phrase
+        # in the evidence hierarchy explanation, but the actual prefix is always prepended
+        # at position 0 when lookup returns data).
+        assert all(not p.startswith("## Verified Table Data") for p in captured_prompts)
         assert "answers" in result
         assert result["answers"] == ["Regular prose answer."]
 
@@ -375,8 +377,8 @@ class TestLookupFailClosed:
             # Must NOT raise
             result = await provide_answer(sub_state, _DUMMY_CONFIG)
 
-        # No injection (error path)
-        assert all("## Verified Table Data" not in p for p in captured_prompts)
+        # No injection (error path) — the prefix must NOT be at the start
+        assert all(not p.startswith("## Verified Table Data") for p in captured_prompts)
         assert "answers" in result
         assert result["answers"] == ["Normal prose answer."]
 

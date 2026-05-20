@@ -23,6 +23,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { StreamingResponse } from '@/components/search/StreamingResponse'
 import { AdvancedModelsDialog } from '@/components/search/AdvancedModelsDialog'
 import { SaveToNotebooksDialog } from '@/components/search/SaveToNotebooksDialog'
+import { EvidenceBadge } from '@/components/evidence-badge'
 
 export default function SearchPage() {
   const { t } = useTranslation()
@@ -282,6 +283,13 @@ export default function SearchPage() {
                   answers={ask.answers}
                   finalAnswer={ask.finalAnswer}
                 />
+
+                {/* Evidence v2: Evidence routing badge */}
+                {ask.finalAnswer && (
+                  <div className="flex items-center gap-2 mt-2">
+                    <EvidenceBadge metadata={ask.evidenceMetadata} />
+                  </div>
+                )}
 
                 {/* Advanced Models Dialog */}
                 <AdvancedModelsDialog

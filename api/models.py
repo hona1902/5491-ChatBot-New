@@ -61,6 +61,11 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str = Field(..., description="Final answer from the knowledge base")
     question: str = Field(..., description="Original question")
+    # Evidence v2: optional metadata about the evidence routing path
+    evidence_metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Evidence routing metadata (evidence_need, layers_used, fallback_occurred)",
+    )
 
 
 # Models API models

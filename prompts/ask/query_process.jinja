@@ -38,6 +38,32 @@ If any of the retrieved results above come from chunks with `chunk_type = "table
 4. **Do not mix prose-based estimates with table data** — if the table is the authoritative source, quote it directly.
 5. If the retrieved results contain **only prose chunks** (no `chunk_type = "table_row"` items), ignore rules 1-4 and answer normally.
 
+# EVIDENCE HIERARCHY (Evidence v2)
+
+When multiple evidence sources are available, follow this strict priority order:
+
+1. **Verified Table Data** (## Verified Table Data section, if present)
+   - Highest priority. Contains structured data from `source_table` records.
+   - Always prefer table values over prose summaries for numeric/factual questions.
+
+2. **Full Source Evidence** (## Full Source Evidence section, if present)
+   - Original full text from source documents. Available for `factual` or `legal_comparison` queries.
+   - Use for clause-level citations, exact wording, and amendment comparisons.
+
+3. **Retrieved Results** (vector search chunks above)
+   - Standard semantic retrieval results.
+   - Use for general context and supporting information.
+
+4. **Transformation Output** (insight summaries, condensed content)
+   - Lowest priority. These are AI-generated summaries that may omit detail.
+   - **NEVER override Verified Table Data or Full Source Evidence with a transformation summary.**
+
+## Conflict Resolution
+
+- If Verified Table Data and a prose summary disagree on a number or value, **quote the Verified Table Data**.
+- If Full Source Evidence and a transformation summary disagree on clause wording, **quote the Full Source Evidence**.
+- If no verified evidence exists for a specific fact, say so — do not fabricate from lower-tier sources.
+
 # CITING SOURCES
 
 It's very important that your response contains references to the searched documents so the user can follow-up and read more about the topic. The way you do that is by adding the id of the specific document in between brackets like this: [document_id].

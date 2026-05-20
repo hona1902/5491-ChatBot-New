@@ -2,9 +2,9 @@
 table_lookup.py — Two-phase row lookup for structured sources.
 
 Scope:
-  - Called only from source_chat.py where source_id is a known state field.
-  - NOT called from ask.py (notebook-level QA) — that is a Phase 2 §5 concern.
-  - Restricted to CSV and XLSX sources; all other file types return None immediately.
+  - Called from source_chat.py and ask.py for source-scoped table lookup.
+  - Eligible for ANY source type that has source_table records
+    (CSV, XLSX, DOCX, PDF, etc.).  No file-extension guard.
 
 Algorithm — Phase 1 (keyword pre-filter):
   1. Fetch all source_table records for the given source_id.
@@ -25,7 +25,7 @@ Algorithm — Phase 2 (semantic fallback, §3 upgrade):
       SourceTable records using row_index (no additional DB call needed).
 
 Guarantees:
-  - Non-CSV/XLSX sources always return None; no embedding call is ever made.
+  - If the source has no source_table records, returns None.
   - If Phase 1 hits, Phase 2 is never executed.
   - If the embedding model call fails, Phase 2 returns None gracefully.
   - If both phases miss, None is returned.
@@ -119,8 +119,8 @@ _STOP_WORDS: frozenset[str] = frozenset(
     }
 )
 
-# File extensions treated as structured tabular sources eligible for exact lookup.
-_STRUCTURED_EXTENSIONS: frozenset[str] = frozenset({".csv", ".xlsx"})
+# (Evidence v2: _STRUCTURED_EXTENSIONS and _is_structured_source removed.
+#  Eligibility is now determined solely by source_table records existing.)
 
 # Maximum number of rows returned by the semantic fallback.
 _SEMANTIC_TOP_N: int = 10
@@ -143,18 +143,7 @@ def _build_markdown_table(headers: list[str], rows: list[dict]) -> str:
     return "\n".join([header_row, separator] + data_rows)
 
 
-def _is_structured_source(source: Source) -> bool:
-    """Return True if the source asset is a CSV or XLSX file."""
-    if not source or not source.asset:
-        return False
-    file_path = source.asset.file_path or ""
-    if not file_path:
-        return False
-    ext = ""
-    dot_pos = file_path.rfind(".")
-    if dot_pos != -1:
-        ext = file_path[dot_pos:].lower()
-    return ext in _STRUCTURED_EXTENSIONS
+
 
 
 def _build_markdown_sections(matched: list[tuple[SourceTable, dict]]) -> str:
@@ -321,7 +310,6 @@ async def table_exact_lookup(query: str, source_id: str) -> Optional[str]:
 
     Returns a GFM Markdown table of all matching rows across all source_table
     records, or ``None`` if:
-      - The source file is not .csv or .xlsx
       - No source_table records exist for this source
       - No cell value or embedding matches any candidate from *query*
 
@@ -333,20 +321,13 @@ async def table_exact_lookup(query: str, source_id: str) -> Optional[str]:
         return None
 
     try:
-        # --- 1. Load the parent source to check file extension ---------------
+        # --- 1. Load the parent source to verify it exists --------------------
         source = await Source.get(source_id)
         if source is None:
             logger.debug(f"table_exact_lookup: source {source_id} not found, skipping")
             return None
 
-        # --- 2. Guard: only CSV / XLSX ----------------------------------------
-        if not _is_structured_source(source):
-            logger.debug(
-                f"table_exact_lookup: source {source_id} is not CSV/XLSX, skipping"
-            )
-            return None
-
-        # --- 3. Fetch source_table records ------------------------------------
+        # --- 2. Fetch source_table records (any source type) ------------------
         table_records: list[SourceTable] = await SourceTable.get_for_source(source_id)
         if not table_records:
             logger.debug(

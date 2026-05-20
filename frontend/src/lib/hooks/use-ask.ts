@@ -18,12 +18,21 @@ interface StrategyData {
   searches: Array<{ term: string; instructions: string }>
 }
 
+// Evidence v2: metadata about evidence routing path
+interface EvidenceMetadata {
+  evidence_need: 'overview' | 'factual' | 'legal_comparison'
+  evidence_layers_used: string[]
+  fallback_occurred: boolean
+}
+
 interface AskState {
   isStreaming: boolean
   strategy: StrategyData | null
   answers: string[]
   finalAnswer: string | null
   error: string | null
+  // Evidence v2: metadata from the evidence routing system
+  evidenceMetadata: EvidenceMetadata | null
 }
 
 export function useAsk() {
@@ -33,7 +42,8 @@ export function useAsk() {
     strategy: null,
     answers: [],
     finalAnswer: null,
-    error: null
+    error: null,
+    evidenceMetadata: null
   })
 
   const sendAsk = useCallback(async (
@@ -59,7 +69,8 @@ export function useAsk() {
       strategy: null,
       answers: [],
       finalAnswer: null,
-      error: null
+      error: null,
+      evidenceMetadata: null
     })
 
     try {
@@ -119,7 +130,9 @@ export function useAsk() {
                 setState(prev => ({
                   ...prev,
                   finalAnswer: data.content || '',
-                  isStreaming: false
+                  isStreaming: false,
+                  // Evidence v2: parse metadata from SSE event
+                  evidenceMetadata: data.evidence_metadata || null
                 }))
               } else if (data.type === 'complete') {
                 setState(prev => ({
@@ -167,7 +180,8 @@ export function useAsk() {
       strategy: null,
       answers: [],
       finalAnswer: null,
-      error: null
+      error: null,
+      evidenceMetadata: null
     })
   }, [])
 

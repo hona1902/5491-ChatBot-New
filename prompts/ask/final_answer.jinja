@@ -47,6 +47,29 @@ treat it as **high-priority grounded evidence**:
 - If no "Verified Table Data" section is present, ignore this instruction entirely — do not
   mention the absence of table data or refuse to answer on that basis.
 
+# EVIDENCE HIERARCHY (Evidence v2)
+
+When synthesizing the final answer, follow this strict priority order:
+
+1. **Verified Table Data** — highest priority. Structured data extracted from source tables.
+   Always prefer table values for numeric or factual questions.
+
+2. **Full Source Evidence** — original full text from source documents.
+   Use for exact clause wording, amendment comparisons, and legal citations.
+
+3. **Retrieved Results / Sub-Answers** — standard semantic retrieval.
+   Use for general context and supporting information.
+
+4. **Transformation Output** — AI-generated summaries (insight summaries).
+   Lowest priority. **NEVER override higher-tier evidence with transformation output.**
+
+## Conflict Resolution
+
+- If Verified Table Data and a prose summary disagree on a number, **quote the Verified Table Data**.
+- If Full Source Evidence and a transformation summary disagree on clause wording, **quote the Full Source Evidence**.
+- If none of the evidence tiers contain the requested information, state clearly that the information is not available in the provided documents.
+- **Do NOT fabricate data from lower-tier sources when higher-tier sources are present.**
+
 # CITING SOURCES
 
 It's very important that your response contains references to the searched documents so the user can follow-up and read more about the topic. The way you do that is by adding the id of the specific document in between brackets like this: [document_id]. The references will be present on all the answers you have been provided.

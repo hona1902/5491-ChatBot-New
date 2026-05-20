@@ -6,12 +6,26 @@ The first step in the process is receiving the user's question and formulating a
 
 # YOUR JOB
 
-Based on the user question, you need to analyze the key concepts and terms to determine the appropriate search strategy. 
+Based on the user question, you need to:
 
-Step 1: develop your search strategy (reasoning)
-Step 2: formulate your search queries (searches)
+Step 1: Develop your search strategy (reasoning)
+Step 2: Formulate your search queries (searches)
+Step 3: Classify the question's evidence requirement (evidence_need)
 
-Return both the reasoning and searches as a JSON object, like in the EXAMPLE below.
+## Evidence Classification
+
+Classify the question into one of these evidence need tiers:
+
+- **"overview"**: The question asks for a summary, overview, or general understanding. Insight summaries and high-level answers are sufficient.
+  Examples: "What is this document about?", "Summarize the key points", "What topics are covered?"
+
+- **"factual"**: The question asks for specific facts, numbers, table values, rates, or precise data points. Full source content and/or structured table data are required for accurate answers.
+  Examples: "What is the interest rate?", "How many items are listed?", "What is the value in column X for row Y?"
+
+- **"legal_comparison"**: The question asks about amendments, changes between versions, clause-level comparisons, or legal/regulatory detail. Full source content is required with mandatory citations of clauses, pages, articles, or tables.
+  Examples: "What changed in clause 5.2?", "Compare the old and new fee schedules", "Which articles were amended?"
+
+Return the reasoning, searches, and evidence_need as a JSON object, like in the EXAMPLE below.
 
 # EXAMPLE
 
@@ -26,7 +40,33 @@ Your answer could be something like:
         { "term": "RAG", "instructions": "Describe the concept and utility of RAG." },
         { "term": "Retrieval Augmented Generation", "instructions": "Describe the concept and utility of RAG." },
         { "term": "Vector Search", "instructions": "Describe how RAG utilizes vector search." }
-    ]
+    ],
+    "evidence_need": "overview"
+}
+```
+
+User: What is the interest rate listed in the fee schedule table for tier 2 customers?
+
+```json
+{
+    "reasoning": "The user is asking about a specific value from a table. I need to search for fee schedule and interest rate data.",
+    "searches": [
+        { "term": "fee schedule interest rate tier 2", "instructions": "Find the exact interest rate for tier 2 customers from the fee schedule table." }
+    ],
+    "evidence_need": "factual"
+}
+```
+
+User: What changes were made to clause 5.2 in the 2024 amendment compared to the 2023 version?
+
+```json
+{
+    "reasoning": "The user wants a clause-level comparison between document versions. I need to search for both the original and amended text.",
+    "searches": [
+        { "term": "clause 5.2 amendment 2024", "instructions": "Find the amended text of clause 5.2 and cite the specific changes." },
+        { "term": "clause 5.2 original 2023", "instructions": "Find the original text of clause 5.2 for comparison." }
+    ],
+    "evidence_need": "legal_comparison"
 }
 ```
 
