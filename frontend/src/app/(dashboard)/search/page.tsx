@@ -17,6 +17,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Search, ChevronDown, AlertCircle, Settings, Save, MessageCircleQuestion } from 'lucide-react'
 import { useSearch } from '@/lib/hooks/use-search'
 import { useAsk } from '@/lib/hooks/use-ask'
+import { useNotebooks } from '@/lib/hooks/use-notebooks'
 import { useModelDefaults, useModels } from '@/lib/hooks/use-models'
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
@@ -24,6 +25,8 @@ import { StreamingResponse } from '@/components/search/StreamingResponse'
 import { AdvancedModelsDialog } from '@/components/search/AdvancedModelsDialog'
 import { SaveToNotebooksDialog } from '@/components/search/SaveToNotebooksDialog'
 import { EvidenceBadge } from '@/components/evidence-badge'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { BookOpen, X } from 'lucide-react'
 
 export default function SearchPage() {
   const { t } = useTranslation()
@@ -46,6 +49,10 @@ export default function SearchPage() {
 
   // Ask state
   const [askQuestion, setAskQuestion] = useState(urlMode === 'ask' ? urlQuery : '')
+
+  // Notebook scope for Ask tab
+  const [selectedNotebookId, setSelectedNotebookId] = useState<string>('')
+  const { data: notebooks } = useNotebooks()
 
   // Advanced models dialog
   const [showAdvancedModels, setShowAdvancedModels] = useState(false)
@@ -111,8 +118,9 @@ export default function SearchPage() {
       finalAnswer: modelDefaults.default_chat_model
     }
 
-    ask.sendAsk(askQuestion, models)
-  }, [askQuestion, modelDefaults, customModels, ask])
+    const notebookId = selectedNotebookId && selectedNotebookId !== '__all__' ? selectedNotebookId : undefined
+    ask.sendAsk(askQuestion, models, notebookId)
+  }, [askQuestion, modelDefaults, customModels, ask, selectedNotebookId])
 
   // Auto-trigger search/ask when arriving with URL params
   useEffect(() => {
@@ -208,6 +216,50 @@ export default function SearchPage() {
                   />
                   <p className="text-xs text-muted-foreground">{t('searchPage.pressToSubmit')}</p>
                 </div>
+
+                {/* Notebook Scope Selector */}
+                {notebooks && notebooks.length > 0 && (
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Notebook scope</Label>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={selectedNotebookId}
+                        onValueChange={setSelectedNotebookId}
+                        disabled={ask.isStreaming}
+                      >
+                        <SelectTrigger id="notebook-scope" className="w-full max-w-xs">
+                          <BookOpen className="h-4 w-4 mr-1 text-muted-foreground" />
+                          <SelectValue placeholder="All notebooks (global)" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__all__">All notebooks (global)</SelectItem>
+                          {notebooks.map((nb) => (
+                            <SelectItem key={nb.id} value={nb.id}>
+                              {nb.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {selectedNotebookId && selectedNotebookId !== '__all__' && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2"
+                          onClick={() => setSelectedNotebookId('')}
+                          disabled={ask.isStreaming}
+                          aria-label="Clear notebook filter"
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {selectedNotebookId && selectedNotebookId !== '__all__'
+                        ? `Scoped to: ${notebooks.find(nb => nb.id === selectedNotebookId)?.name ?? 'Selected notebook'}`
+                        : 'Search across all notebooks and sources'}
+                    </p>
+                  </div>
+                )}
 
                 {/* Models Display */}
                 {!hasEmbeddingModel ? (
