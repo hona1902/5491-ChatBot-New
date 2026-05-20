@@ -50,8 +50,8 @@ export function useNotebookSources(notebookId: string) {
     initialPageParam: 0,
     getNextPageParam: (lastPage) => lastPage.nextOffset,
     enabled: !!notebookId,
-    staleTime: 5 * 1000,
-    refetchOnWindowFocus: true,
+    staleTime: 30 * 1000, // 30 seconds — prevents aggressive refetch that triggers buildContext loop
+    refetchOnWindowFocus: false, // Disable focus-refetch to prevent sources → buildContext → context POST cycle
   })
 
   // Flatten all pages into a single array (memoized to prevent infinite re-renders)

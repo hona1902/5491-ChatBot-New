@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { getApiErrorMessage } from '@/lib/utils/error-handler'
@@ -23,6 +23,19 @@ interface UseNotebookChatParams {
   contextSelections: ContextSelections
 }
 
+/**
+ * Stable serialization of context selections used to detect when the user
+ * has actually changed which sources/notes are selected. This prevents the
+ * buildContext useEffect from firing on every sources-array identity change
+ * (which happens on every React Query refetch).
+ */
+function serializeContextSelections(sel: ContextSelections): string {
+  // Sort keys so the string is stable regardless of insertion order
+  const sortedSources = Object.keys(sel.sources).sort().map(k => `${k}:${sel.sources[k]}`).join(',')
+  const sortedNotes = Object.keys(sel.notes).sort().map(k => `${k}:${sel.notes[k]}`).join(',')
+  return `s=${sortedSources};n=${sortedNotes}`
+}
+
 export function useNotebookChat({ notebookId, sources, notes, contextSelections }: UseNotebookChatParams) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -34,6 +47,9 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
   // Pending model override for when user changes model before a session exists
   const [pendingModelOverride, setPendingModelOverride] = useState<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
+  // Track the last context selection key that triggered a buildContext call.
+  // Using a ref (not state) ensures the effect does not re-run when this updates.
+  const lastBuiltContextKeyRef = useRef<string>('')
 
   // Fetch sessions for this notebook
   const {
@@ -300,8 +316,19 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
     } finally {
       setIsStreaming(false)
       abortControllerRef.current = null
-      // Refetch session to get persisted messages from LangGraph checkpoint
-      refetchCurrentSession()
+      // Refetch session to get persisted messages from LangGraph checkpoint.
+      // Guard: only replace local messages if the backend response contains
+      // actual messages — prevents an empty/stale response from wiping the
+      // optimistically-rendered streamed answer.
+      refetchCurrentSession().then((result) => {
+        const fetchedMessages = result?.data?.messages ?? []
+        if (fetchedMessages.length > 0) {
+          setMessages(fetchedMessages)
+        }
+        // If fetchedMessages is empty, keep the current optimistic messages.
+      }).catch(() => {
+        // If refetch fails (network / 404), keep the current streamed messages.
+      })
     }
   }, [
     notebookId,
@@ -362,8 +389,22 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
     }
   }, [currentSessionId, updateSessionMutation])
 
-  // Update token/char counts when context selections change
+  // Stable key representing the current context selections.
+  // Re-computed only when selections actually change (not on sources-array identity churn).
+  const currentContextKey = useMemo(
+    () => serializeContextSelections(contextSelections),
+    [contextSelections]
+  )
+
+  // Update token/char counts ONLY when context selections actually change.
+  // Previously this effect depended on [buildContext] which changed on every
+  // sources refetch (because sources is a new array reference each time),
+  // causing a tight POST /api/chat/context → refetch → new buildContext cycle.
   useEffect(() => {
+    // Skip if this exact selection set was already built.
+    if (currentContextKey === lastBuiltContextKeyRef.current) return
+    lastBuiltContextKeyRef.current = currentContextKey
+
     const updateContextCounts = async () => {
       try {
         await buildContext()
@@ -372,7 +413,11 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
       }
     }
     updateContextCounts()
-  }, [buildContext])
+    // Intentionally depend on currentContextKey (stable string) and NOT on
+    // buildContext directly, to break the sources-refetch → buildContext cycle.
+    // buildContext is called inside so it always uses the latest closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentContextKey])
 
   return {
     // State

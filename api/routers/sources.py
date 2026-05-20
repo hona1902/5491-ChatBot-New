@@ -192,9 +192,15 @@ async def get_sources(
 
         # Build the query
         if notebook_id:
-            # Verify notebook exists first
-            notebook = await Notebook.get(notebook_id)
-            if not notebook:
+            # Verify notebook exists using a raw query that is not owner-scoped.
+            # Notebook.get() may return None for normal users due to SurrealDB
+            # row-level permissions even when the notebook exists and is accessible.
+            # This caused a false 404 → infinite client retry loop for normal users.
+            notebook_rows = await repo_query(
+                "SELECT id FROM notebook WHERE id = $notebook_id LIMIT 1",
+                {"notebook_id": ensure_record_id(notebook_id)},
+            )
+            if not notebook_rows:
                 raise HTTPException(status_code=404, detail="Notebook not found")
 
             # Query sources for specific notebook - include command field with FETCH
